@@ -2,6 +2,7 @@ from fastapi import FastAPI
 
 from q2_proration import router as proration_router
 from q3_guardrail import router as guardrail_router
+from q4_skill_scanner import router as skill_scanner_router
 
 
 app = FastAPI(
@@ -12,6 +13,7 @@ app = FastAPI(
 
 app.include_router(proration_router)
 app.include_router(guardrail_router)
+app.include_router(skill_scanner_router)
 
 
 @app.get("/")
@@ -21,6 +23,7 @@ def root():
         "endpoints": [
             "POST /proration",
             "POST /guardrail",
+            "POST /skill-scan",
         ],
     }
 
