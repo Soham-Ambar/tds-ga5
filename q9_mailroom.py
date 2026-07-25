@@ -5,9 +5,13 @@ import binascii
 import hashlib
 import httpx
 import json
+import logging
+import os
 import re
 import sqlite3
 import threading
+import time as time_module
+from urllib.parse import urlparse
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
@@ -27,6 +31,15 @@ from q9_decision_engine import (
     ProposalValidationError,
     generate_validated_proposals,
     validate_proposal,
+)
+
+
+logger = logging.getLogger(__name__)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(levelname)s %(name)s %(message)s",
+    force=True,
 )
 
 
@@ -2144,6 +2157,38 @@ def process_commit(
 # Endpoint
 # ============================================================
 
+def _provider_hostname() -> str:
+    raw = os.environ.get("MAILROOM_AI_URL", "").strip()
+    return urlparse(raw).hostname or "unknown"
+
+
+def _provider_model() -> str:
+    return os.environ.get("MAILROOM_AI_MODEL", "").strip()
+
+
+def _response_format_enabled() -> bool:
+    return os.environ.get("MAILROOM_AI_RESPONSE_FORMAT", "1").strip() != "0"
+
+
+def _make_503_detail(
+    error: Exception,
+    eval_id: str | None = None,
+    dossier_count: int | None = None,
+) -> dict[str, Any]:
+    """Build a safe 503 detail dict with diagnostic fields."""
+    provider_status: int | None = None
+    if isinstance(error, AIProviderError):
+        provider_status = getattr(error, "status_code", None)
+
+    detail: dict[str, Any] = {
+        "detail": "AI provider failure",
+        "error_type": type(error).__name__,
+        "provider_status": provider_status,
+        "reason": str(error)[:300],
+    }
+    return detail
+
+
 @router.post("/mailroom-agent")
 async def mailroom_agent(
     body: dict[str, Any],
@@ -2174,6 +2219,10 @@ async def mailroom_agent(
                     error
                 ),
             ) from error
+
+        eval_id = request.evaluationId
+        dossier_count = len(request.dossiers)
+        start_time = time_module.monotonic()
 
         try:
             result = save_new_evaluation(
@@ -2207,6 +2256,16 @@ async def mailroom_agent(
             raise
 
         except ProposalValidationError as error:
+            hostname = _provider_hostname()
+            model = _provider_model()
+            elapsed = time_module.monotonic() - start_time
+            logger.error(
+                "error=ProposalValidationError evalId=%s "
+                "hostname=%s model=%s elapsed=%.1fs "
+                "dossier_count=%d response_format=%s",
+                eval_id, hostname, model, elapsed,
+                dossier_count, _response_format_enabled(),
+            )
             raise HTTPException(
                 status_code=502,
                 detail={
@@ -2219,6 +2278,16 @@ async def mailroom_agent(
             ) from error
 
         except AIOutputError as error:
+            hostname = _provider_hostname()
+            model = _provider_model()
+            elapsed = time_module.monotonic() - start_time
+            logger.error(
+                "error=AIOutputError evalId=%s "
+                "hostname=%s model=%s elapsed=%.1fs "
+                "dossier_count=%d response_format=%s",
+                eval_id, hostname, model, elapsed,
+                dossier_count, _response_format_enabled(),
+            )
             raise HTTPException(
                 status_code=502,
                 detail={
@@ -2231,15 +2300,27 @@ async def mailroom_agent(
             ) from error
 
         except AIProviderError as error:
+            hostname = getattr(error, "provider_hostname", _provider_hostname())
+            model = getattr(error, "model", _provider_model())
+            provider_status = getattr(error, "status_code", None)
+            preview = getattr(error, "preview", "")
+            attempt = getattr(error, "attempt", 0)
+            response_format = getattr(error, "response_format_enabled", _response_format_enabled())
+            elapsed = time_module.monotonic() - start_time
+            logger.error(
+                "error=AIProviderError evalId=%s "
+                "hostname=%s model=%s status=%s elapsed=%.1fs "
+                "dossier_count=%d response_format=%s attempt=%d "
+                "preview=%.500s",
+                eval_id, hostname, model, provider_status,
+                elapsed, dossier_count, response_format,
+                attempt, preview,
+            )
             raise HTTPException(
                 status_code=503,
-                detail={
-                    "message": (
-                        "The external decision provider "
-                        "could not complete."
-                    ),
-                    "error": str(error),
-                },
+                detail=_make_503_detail(
+                    error, eval_id, dossier_count,
+                ),
             ) from error
 
         except (
@@ -2248,15 +2329,20 @@ async def mailroom_agent(
             httpx.HTTPError,
             sqlite3.Error,
         ) as error:
+            hostname = _provider_hostname()
+            model = _provider_model()
+            elapsed = time_module.monotonic() - start_time
+            logger.exception(
+                "error=%s evalId=%s hostname=%s model=%s "
+                "elapsed=%.1fs dossier_count=%d",
+                type(error).__name__, eval_id,
+                hostname, model, elapsed, dossier_count,
+            )
             raise HTTPException(
                 status_code=503,
-                detail={
-                    "message": (
-                        "The mailroom decision engine "
-                        "could not complete safely."
-                    ),
-                    "error": str(error),
-                },
+                detail=_make_503_detail(
+                    error, eval_id, dossier_count,
+                ),
             ) from error
 
     if operation == "commit":

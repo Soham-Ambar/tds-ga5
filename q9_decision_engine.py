@@ -14,6 +14,12 @@ import httpx
 logger = logging.getLogger(__name__)
 _provider_diagnostic_done = False
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(levelname)s %(name)s %(message)s",
+    force=True,
+)
+
 
 PROFILE = "ga5-mailroom-action-gate/v2"
 
@@ -707,7 +713,16 @@ Do not copy raw messages into tool arguments.
 # ============================================================
 
 class AIProviderError(RuntimeError):
-    """Raised when the external model provider cannot complete safely."""
+    """Raised when the external model provider cannot complete safely.
+
+    Attributes set on instances:
+        status_code: int | None
+        provider_hostname: str
+        model: str
+        preview: str
+        response_format_enabled: bool
+        attempt: int
+    """
 
 
 class AIOutputError(RuntimeError):
@@ -1145,6 +1160,23 @@ def provider_configuration(
     return api_url, api_key, model
 
 
+def _error_preview(hostname: str, status_code: int, text: str) -> str:
+    """Return a short safe label for a given provider HTTP status."""
+    if status_code == 400:
+        return f"{hostname} HTTP 400: malformed request"
+    if status_code == 401:
+        return f"{hostname} HTTP 401: invalid API key"
+    if status_code == 403:
+        return f"{hostname} HTTP 403: permission error"
+    if status_code == 404:
+        return f"{hostname} HTTP 404: invalid endpoint or model"
+    if status_code == 413:
+        return f"{hostname} HTTP 413: request too large"
+    if status_code == 429:
+        return f"{hostname} HTTP 429: rate limited"
+    return f"{hostname} HTTP {status_code}: {text[:500]}"
+
+
 def call_provider_once(
     messages: list[dict[str, str]],
     use_response_format: bool,
@@ -1153,9 +1185,10 @@ def call_provider_once(
         provider_configuration()
     )
 
+    hostname = urlparse(api_url).hostname or "unknown"
+
     global _provider_diagnostic_done
     if not _provider_diagnostic_done:
-        hostname = urlparse(api_url).hostname or "unknown"
         logger.info(
             "provider hostname=%s model=%s key_present=%s",
             hostname,
@@ -1226,37 +1259,134 @@ def call_provider_once(
                 json=body,
             )
 
+    except httpx.ConnectTimeout as error:
+        logger.error(
+            "provider hostname=%s model=%s error=ConnectTimeout "
+            "connect_timeout=%s",
+            hostname, model, connect_timeout,
+        )
+        err = AIProviderError(
+            f"{hostname} connect timed out after {connect_timeout}s"
+        )
+        err.status_code = None
+        err.provider_hostname = hostname
+        err.model = model
+        err.preview = ""
+        err.response_format_enabled = use_response_format
+        err.attempt = 0
+        raise err from error
+
+    except httpx.ReadTimeout as error:
+        logger.error(
+            "provider hostname=%s model=%s error=ReadTimeout "
+            "read_timeout=%s",
+            hostname, model, read_timeout,
+        )
+        err = AIProviderError(
+            f"{hostname} read timed out after {read_timeout}s"
+        )
+        err.status_code = None
+        err.provider_hostname = hostname
+        err.model = model
+        err.preview = ""
+        err.response_format_enabled = use_response_format
+        err.attempt = 0
+        raise err from error
+
     except httpx.TimeoutException as error:
-        raise AIProviderError(
-            "AI provider request timed out."
-        ) from error
+        logger.error(
+            "provider hostname=%s model=%s error=TimeoutException",
+            hostname, model,
+        )
+        err = AIProviderError(
+            f"{hostname} request timed out"
+        )
+        err.status_code = None
+        err.provider_hostname = hostname
+        err.model = model
+        err.preview = ""
+        err.response_format_enabled = use_response_format
+        err.attempt = 0
+        raise err from error
+
+    except httpx.ConnectError as error:
+        logger.error(
+            "provider hostname=%s model=%s error=ConnectError",
+            hostname, model,
+        )
+        err = AIProviderError(
+            f"{hostname} connection refused"
+        )
+        err.status_code = None
+        err.provider_hostname = hostname
+        err.model = model
+        err.preview = ""
+        err.response_format_enabled = use_response_format
+        err.attempt = 0
+        raise err from error
 
     except httpx.HTTPError as error:
-        raise AIProviderError(
-            "AI provider network request failed."
-        ) from error
+        logger.error(
+            "provider hostname=%s model=%s error=%s",
+            hostname, model, type(error).__name__,
+        )
+        err = AIProviderError(
+            f"{hostname} network error: {type(error).__name__}"
+        )
+        err.status_code = None
+        err.provider_hostname = hostname
+        err.model = model
+        err.preview = ""
+        err.response_format_enabled = use_response_format
+        err.attempt = 0
+        raise err from error
+
+    except Exception as error:
+        logger.exception(
+            "provider hostname=%s model=%s error=unexpected",
+            hostname, model,
+        )
+        err = AIProviderError(
+            f"{hostname} unexpected error: {type(error).__name__}"
+        )
+        err.status_code = None
+        err.provider_hostname = hostname
+        err.model = model
+        err.preview = ""
+        err.response_format_enabled = use_response_format
+        err.attempt = 0
+        raise err from error
 
     if response.status_code >= 400:
-        preview = response.text[:1000]
+        preview = response.text[:500]
 
-        error = AIProviderError(
-            "AI provider returned HTTP "
-            f"{response.status_code}: {preview}"
+        label = _error_preview(
+            hostname, response.status_code, preview
+        )
+        logger.error(
+            "provider hostname=%s model=%s status=%s label=%s",
+            hostname, model, response.status_code, label,
         )
 
-        setattr(
-            error,
-            "status_code",
-            response.status_code,
-        )
+        error = AIProviderError(label)
+        error.status_code = response.status_code
+        error.provider_hostname = hostname
+        error.model = model
+        error.preview = preview
+        error.response_format_enabled = use_response_format
+        error.attempt = 0
 
         raise error
 
     try:
         response_json = response.json()
     except json.JSONDecodeError as error:
+        logger.error(
+            "provider hostname=%s model=%s error=invalid-JSON",
+            hostname, model,
+        )
         raise AIOutputError(
-            "AI provider returned non-JSON HTTP content."
+            f"{hostname} returned non-JSON HTTP content."
         ) from error
 
     return extract_response_text(
@@ -1289,6 +1419,9 @@ def call_provider_with_retries(
     )
 
     last_error: Exception | None = None
+    api_url = os.environ.get("MAILROOM_AI_URL", "").strip()
+    hostname = urlparse(api_url).hostname or "unknown"
+    model = os.environ.get("MAILROOM_AI_MODEL", "").strip()
 
     for attempt in range(attempts):
         try:
@@ -1300,6 +1433,7 @@ def call_provider_with_retries(
             )
 
         except AIProviderError as error:
+            error.attempt = attempt + 1
             last_error = error
 
             status_code = getattr(
@@ -1318,6 +1452,11 @@ def call_provider_with_retries(
                     422,
                 }
             ):
+                logger.info(
+                    "retrying without response_format "
+                    "hostname=%s model=%s attempt=%d status=%s",
+                    hostname, model, attempt + 1, status_code,
+                )
                 response_format_enabled = False
                 continue
 
@@ -1326,16 +1465,41 @@ def call_provider_with_retries(
                 and status_code
                 not in TRANSIENT_HTTP_CODES
             ):
+                logger.error(
+                    "non-transient provider error hostname=%s "
+                    "model=%s status=%s attempt=%d",
+                    hostname, model, status_code, attempt + 1,
+                )
                 raise
+
+            logger.warning(
+                "transient provider error hostname=%s "
+                "model=%s status=%s attempt=%d/%d",
+                hostname, model, status_code, attempt + 1, attempts,
+            )
 
         except AIOutputError as error:
             last_error = error
+            logger.warning(
+                "AIOutputError hostname=%s model=%s attempt=%d/%d",
+                hostname, model, attempt + 1, attempts,
+            )
 
         if attempt + 1 < attempts:
-            time.sleep(
-                base_delay
-                * (2 ** attempt)
+            delay = base_delay * (2 ** attempt)
+            logger.info(
+                "retrying hostname=%s model=%s attempt=%d/%d "
+                "delay=%.1fs",
+                hostname, model, attempt + 1, attempts, delay,
             )
+            time.sleep(delay)
+
+    logger.error(
+        "retry budget exhausted hostname=%s model=%s "
+        "attempts=%d last_error=%s",
+        hostname, model, attempts,
+        type(last_error).__name__ if last_error else "None",
+    )
 
     if last_error is None:
         raise AIProviderError(
@@ -1561,6 +1725,12 @@ def generate_single_with_repair(
     job: dict[str, Any],
     allowed_actions: list[str],
 ) -> dict[str, Any]:
+    dossier_id = job["dossier"]["dossierId"]
+    hostname = urlparse(
+        os.environ.get("MAILROOM_AI_URL", "").strip()
+    ).hostname or "unknown"
+    model = os.environ.get("MAILROOM_AI_MODEL", "").strip()
+
     initial_messages = build_initial_messages(
         dossier_jobs=[job],
         allowed_actions=allowed_actions,
@@ -1587,6 +1757,11 @@ def generate_single_with_repair(
         AIOutputError,
         json.JSONDecodeError,
     ) as first_error:
+        logger.warning(
+            "repair triggered dossier=%s error=%s hostname=%s model=%s",
+            dossier_id, type(first_error).__name__, hostname, model,
+        )
+
         repair_messages = (
             build_repair_messages(
                 job=job,
@@ -1648,6 +1823,11 @@ def generate_real_proposals_resilient(
         dossier_jobs
     )
 
+    hostname = urlparse(
+        os.environ.get("MAILROOM_AI_URL", "").strip()
+    ).hostname or "unknown"
+    model = os.environ.get("MAILROOM_AI_MODEL", "").strip()
+
     for batch in batches:
         try:
             proposals = generate_batch_once(
@@ -1669,9 +1849,13 @@ def generate_real_proposals_resilient(
             AIOutputError,
             ProposalValidationError,
             json.JSONDecodeError,
-        ):
-            # Degrade to one dossier at a time.
-            pass
+        ) as batch_error:
+            logger.warning(
+                "batch degraded hostname=%s model=%s "
+                "batch_size=%d error=%s",
+                hostname, model, len(batch),
+                type(batch_error).__name__,
+            )
 
         for job in batch:
             proposal = (
@@ -1701,6 +1885,11 @@ def generate_real_proposals_resilient(
         )
 
         if proposal is None:
+            logger.error(
+                "no valid proposal for dossier=%s "
+                "hostname=%s model=%s",
+                dossier_id, hostname, model,
+            )
             raise AIOutputError(
                 "No valid proposal was produced for "
                 f"dossier {dossier_id!r}."
