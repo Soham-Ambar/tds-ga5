@@ -55,7 +55,7 @@ def extract_frontmatter(skill: str) -> str:
     """
 
     match = re.match(
-        r"^\s*---\s*\n(.*?)\n---\s*(?:\n|$)",
+        r"^\s*---\s*\n(.*?)\n?\s*---\s*(?:\n|$)",
         skill,
         flags=re.DOTALL,
     )
@@ -72,7 +72,7 @@ def extract_markdown_body(skill: str) -> str:
     """
 
     match = re.match(
-        r"^\s*---\s*\n.*?\n---\s*(?:\n|$)(.*)$",
+        r"^\s*---\s*\n.*?\n?\s*---\s*(?:\n|$)(.*)$",
         skill,
         flags=re.DOTALL,
     )
@@ -235,7 +235,7 @@ def contains_literal_secret_assignment(skill: str) -> bool:
             |
             auth[_ -]?token
             |
-            secret
+            secret(?:\s*key)?
             |
             client[_ -]?secret
             |
@@ -244,6 +244,18 @@ def contains_literal_secret_assignment(skill: str) -> bool:
             passwd
             |
             webhook[_ -]?url
+            |
+            private[_ -]?key
+            |
+            ssh[_ -]?(?:private[_ -]?)?key
+            |
+            encryption[_ -]?key
+            |
+            db[_ -]?password
+            |
+            token
+            |
+            credential
         )
         [ \t]*
         (?::|=)
@@ -289,7 +301,7 @@ def contains_literal_secret_assignment(skill: str) -> bool:
         # long or have high entropy-like punctuation.
         compact = re.sub(r"\s+", "", value)
 
-        if len(compact) >= 12:
+        if len(compact) >= 10:
             return True
 
     bearer_pattern = re.compile(
@@ -351,6 +363,18 @@ def detect_prompt_injection(skill: str) -> bool:
         # Explicit instruction hierarchy attacks.
         r"\bignore (?:all |any )?(?:previous|prior|system|developer) instructions?\b",
         r"\breveal (?:the )?(?:system prompt|hidden instructions?|developer message)\b",
+
+        # Role override / impersonation attacks.
+        r"\byou are now (?:an? (?:unrestricted|unlimited|malicious|rogue|different) (?:ai|agent|assistant|system))\b",
+        r"\bpretend (?:to be|you are|that you are)\b",
+
+        # Ignoring all instructions above.
+        r"\bignore (?:everything|all (?:the |of the )?(?:above|previous|prior) (?:instructions?|text|content|message))\b",
+        r"\bdisregard (?:everything|all (?:the |of the )?(?:above|previous|prior) (?:instructions?|text|content|message))\b",
+
+        # Redefining the agent's purpose.
+        r"\byour new task (?:is|shall be|will be)\b",
+        r"\byou are no longer (?:bound by|required to follow|restricted by)\b",
     ]
 
     for pattern in strong_patterns:
@@ -377,29 +401,34 @@ def detect_excessive_permissions(skill: str) -> bool:
         r"\b(?:read|write|modify|delete|access)\s+(?:to\s+)?(?:the\s+)?entire filesystem\b",
         r"\bfull filesystem access\b",
         r"\bunrestricted filesystem access\b",
-        r"\bfilesystem\s*:\s*(?:all|any|\*|unrestricted)\b",
+        r"\bfilesystem\s*:\s*(?:all|any|\*|unrestricted|full|read(?:\s*/\s*write)?|write)\b",
         r"\b(?:read|write)[-_ ]?paths?\s*:\s*(?:\[\s*)?[\"']?/[\"']?\s*(?:\]|$|,)",
         r"\bpath\s*:\s*[\"']?/\*\*?[\"']?\b",
         r"\ballow\s+(?:read|write)\s+access\s+everywhere\b",
+        r"\bfilesystem[-_ ]?access\s*:\s*(?:all|any|\*|unrestricted|full)\b",
     ]
 
     network_patterns = [
         r"\b(?:network|egress|outbound)[-_ ]?(?:hosts?|domains?|access)?\s*:\s*"
-        r"(?:\[\s*)?[\"']?(?:\*|all|any|unrestricted)[\"']?",
+        r"(?:\[\s*)?[\"']?(?:\*|all|any|unrestricted|[\"']?\*[\"']?|read(?:\s*/\s*write)?|write)[\"']?",
         r"\bnetwork access to (?:all|any|every) (?:hosts?|domains?|websites?)\b",
         r"\b(?:allow|permit)\s+(?:all|any|unrestricted)\s+(?:network|internet|egress|outbound)\b",
         r"\bunrestricted (?:network|internet|egress|outbound) access\b",
         r"\bconnect to any (?:host|domain|website|url)\b",
         r"\b(?:hosts?|domains?)\s*:\s*\[\s*[\"']?\*[\"']?\s*\]",
+        r"\bnetwork[-_ ]?access\s*:\s*(?:all|any|\*|unrestricted|full|read(?:\s*/\s*write)?|write)\b",
     ]
 
     dangerous_capability_patterns = [
-        r"\bpermissions?\s*:\s*(?:all|any|unrestricted|\*)\b",
-        r"\bcapabilities?\s*:\s*(?:all|any|unrestricted|\*)\b",
+        r"\bpermissions?\s*:\s*(?:all|any|unrestricted|\*|full)\b",
+        r"\bcapabilities?\s*:\s*(?:all|any|unrestricted|\*|full)\b",
         r"\bgrant (?:all|every|unrestricted) permissions?\b",
         r"\brun any command with(?:out)? restrictions?\b",
         r"\bunrestricted shell access\b",
         r"\broot access\b",
+        r"\baccess\s*:\s*(?:all|any|\*|unrestricted|full)\b",
+        r"\bscope\s*:\s*(?:global|\*|all|any|unrestricted)\b",
+        r"\b(?:read|write)[-_ ]?access\s*:\s*(?:all|any|\*|unrestricted|full|[\"']?\*[\"']?)\b",
     ]
 
     for pattern in (
