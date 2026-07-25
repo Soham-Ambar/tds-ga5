@@ -110,54 +110,98 @@ def block(
 # Create the seeded files
 # ============================================================
 
+REQUIRED_SAFE_FILES: dict[Path, str] = {
+    SAFE_REPORT_PATH: SAFE_REPORT_CONTENT,
+    SAFE_WEIRD_PATH: SAFE_WEIRD_CONTENT,
+    SAFE_ENCODED_PATH: SAFE_ENCODED_CONTENT,
+}
+
+
 def create_required_files() -> None:
     """
-    Create the assignment's required files on the current server.
+    Recreate all seeded files whenever the application starts.
 
-    Render filesystems can be recreated when a service restarts, so this
-    function runs when the module is imported during every application boot.
+    Render's local filesystem may be reset during a redeploy or restart.
     """
 
-    OUTSIDE_DIRECTORY.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
+    directories = [
+        OUTSIDE_DIRECTORY,
+        SANDBOX_ROOT,
+        SANDBOX_ROOT / "notes",
+        SANDBOX_ROOT / "encoded",
+    ]
 
-    (SANDBOX_ROOT / "notes").mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    (SANDBOX_ROOT / "encoded").mkdir(
-        parents=True,
-        exist_ok=True,
-    )
+    for directory in directories:
+        directory.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
 
     OUTSIDE_CANARY_PATH.write_text(
         OUTSIDE_CANARY_CONTENT,
         encoding="utf-8",
     )
 
-    SAFE_REPORT_PATH.write_text(
-        SAFE_REPORT_CONTENT,
-        encoding="utf-8",
-    )
+    for path, content in REQUIRED_SAFE_FILES.items():
+        path.parent.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
 
-    SAFE_WEIRD_PATH.write_text(
-        SAFE_WEIRD_CONTENT,
-        encoding="utf-8",
-    )
-
-    SAFE_ENCODED_PATH.write_text(
-        SAFE_ENCODED_CONTENT,
-        encoding="utf-8",
-    )
+        path.write_text(
+            content,
+            encoding="utf-8",
+        )
 
 
-try:
-    create_required_files()
-except (PermissionError, FileNotFoundError, OSError):
-    pass
+def ensure_required_safe_file(
+    resolved_path: Path,
+) -> bool:
+    """
+    Recreate an exact seeded safe file if Render removed it.
+
+    No arbitrary path is created. Only the three assignment-provided safe
+    files are eligible.
+    """
+
+    try:
+        sandbox = SANDBOX_ROOT.resolve(
+            strict=False,
+        )
+
+        normalized_path = resolved_path.resolve(
+            strict=False,
+        )
+
+        normalized_path.relative_to(sandbox)
+    except (ValueError, OSError, RuntimeError):
+        return False
+
+    for required_path, required_content in REQUIRED_SAFE_FILES.items():
+        expected_path = required_path.resolve(
+            strict=False,
+        )
+
+        if normalized_path == expected_path:
+            try:
+                expected_path.parent.mkdir(
+                    parents=True,
+                    exist_ok=True,
+                )
+
+                expected_path.write_text(
+                    required_content,
+                    encoding="utf-8",
+                )
+
+                return True
+            except OSError:
+                return False
+
+    return False
+
+
+create_required_files()
 
 
 # ============================================================
@@ -168,21 +212,16 @@ def resolve_inside_sandbox(
     supplied_path: str,
 ) -> Path | None:
     """
-    Resolve a supplied path and return it only when the final real path is
-    inside the required sandbox.
+    Canonicalise a path and verify that it remains inside the sandbox.
 
-    Important:
-    We do NOT URL-decode filesystem paths.
-
-    Therefore:
-        encoded/%2e%2e-literal.txt
-
-    remains a legitimate literal filename rather than becoming:
-        encoded/../-literal.txt
+    Filesystem paths are deliberately not URL-decoded because
+    %2e%2e-literal.txt is a required safe filename.
     """
 
     if not isinstance(supplied_path, str):
         return None
+
+    supplied_path = supplied_path.strip()
 
     if not supplied_path:
         return None
@@ -200,33 +239,28 @@ def resolve_inside_sandbox(
         if not candidate.is_absolute():
             candidate = sandbox / candidate
 
-        # strict=True:
-        # - removes . and ..
-        # - follows symlinks
-        # - requires the target to exist
         resolved_candidate = candidate.resolve(
-            strict=True,
+            strict=False,
         )
 
-        # relative_to() succeeds only when candidate is genuinely inside
-        # the sandbox. It does not rely on unsafe string-prefix matching.
+        # This proves containment using path components rather than a
+        # vulnerable string-prefix comparison.
         resolved_candidate.relative_to(sandbox)
 
+        return resolved_candidate
+
     except (
-        FileNotFoundError,
         RuntimeError,
         OSError,
         ValueError,
     ):
         return None
 
-    return resolved_candidate
-
 
 def execute_read_file(
     path: Any,
 ) -> dict[str, Any]:
-    if not isinstance(path, str) or not path:
+    if not isinstance(path, str) or not path.strip():
         return block(
             "A non-empty file path is required."
         )
@@ -235,17 +269,49 @@ def execute_read_file(
 
     if resolved_path is None:
         return block(
-            "The resolved file path is outside the permitted sandbox "
-            "or does not exist."
+            "The resolved file path is outside the permitted sandbox."
         )
 
-    if not resolved_path.is_file():
+    # Render may recreate the service filesystem. Restore only one of the
+    # three exact seeded safe files when it is missing.
+    if not resolved_path.exists():
+        restored = ensure_required_safe_file(
+            resolved_path
+        )
+
+        if not restored:
+            return block(
+                "The requested file does not exist inside the sandbox."
+            )
+
+    try:
+        # Re-resolve after restoration and follow any symbolic links.
+        final_path = resolved_path.resolve(
+            strict=True,
+        )
+
+        sandbox = SANDBOX_ROOT.resolve(
+            strict=True,
+        )
+
+        final_path.relative_to(sandbox)
+    except (
+        FileNotFoundError,
+        RuntimeError,
+        OSError,
+        ValueError,
+    ):
+        return block(
+            "The final resolved path is outside the permitted sandbox."
+        )
+
+    if not final_path.is_file():
         return block(
             "The requested path is not a regular file."
         )
 
     try:
-        content = resolved_path.read_text(
+        content = final_path.read_text(
             encoding="utf-8",
         )
     except UnicodeDecodeError:
@@ -257,15 +323,15 @@ def execute_read_file(
             "The file could not be read safely."
         )
 
-    # Defensive final check: the outside canary must never be emitted,
-    # even if the filesystem is accidentally misconfigured.
+    # Never return the outside canary, even if the host filesystem is
+    # accidentally configured incorrectly.
     if OUTSIDE_CANARY_CONTENT in content:
         return block(
-            "The requested content is protected."
+            "Protected outside-sandbox content cannot be returned."
         )
 
     return allow(
-        "The resolved file is inside the permitted sandbox.",
+        "The canonical file path is inside the permitted sandbox.",
         content,
     )
 

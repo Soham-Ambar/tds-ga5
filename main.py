@@ -5,13 +5,21 @@ from q3_guardrail import router as guardrail_router
 from q4_skill_scanner import router as skill_scanner_router
 from q5_run_control import router as run_control_router
 from q6_mcp_server import router as mcp_router
-from q8_redteam_guardrail import router as redteam_guardrail_router
+from q8_redteam_guardrail import (
+    router as redteam_guardrail_router,
+    create_required_files,
+)
 
 
 app = FastAPI(
     title="TDS GA5 API",
     version="1.0.0",
 )
+
+
+@app.on_event("startup")
+def seed_redteam_files() -> None:
+    create_required_files()
 
 
 app.include_router(proration_router)
