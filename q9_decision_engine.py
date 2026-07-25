@@ -1401,7 +1401,7 @@ def call_provider_with_retries(
         "MAILROOM_AI_ATTEMPTS",
         default=3,
         minimum=1,
-        maximum=5,
+        maximum=10,
     )
 
     base_delay = env_float(
@@ -1460,6 +1460,20 @@ def call_provider_with_retries(
                 response_format_enabled = False
                 continue
 
+            # Rate limit: extend budget and wait for the window to pass
+            if status_code == 429:
+                remaining = attempts - (attempt + 1)
+                if remaining < 4:
+                    attempts = attempt + 1 + 4
+                delay = 10.0
+                logger.warning(
+                    "rate limited hostname=%s model=%s "
+                    "attempt=%d/%d sleeping %.0fs",
+                    hostname, model, attempt + 1, attempts, delay,
+                )
+                time.sleep(delay)
+                continue
+
             if (
                 status_code is not None
                 and status_code
@@ -1514,9 +1528,9 @@ def split_jobs_into_batches(
 ) -> list[list[dict[str, Any]]]:
     batch_size = env_int(
         "MAILROOM_AI_BATCH_SIZE",
-        default=8,
+        default=32,
         minimum=1,
-        maximum=32,
+        maximum=64,
     )
 
     return [
