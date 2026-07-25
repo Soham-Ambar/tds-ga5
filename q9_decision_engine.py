@@ -1463,9 +1463,9 @@ def call_provider_with_retries(
             # Rate limit: extend budget and wait for the window to pass
             if status_code == 429:
                 remaining = attempts - (attempt + 1)
-                if remaining < 4:
-                    attempts = attempt + 1 + 4
-                delay = 10.0
+                if remaining < 6:
+                    attempts = attempt + 1 + 6
+                delay = 20.0
                 logger.warning(
                     "rate limited hostname=%s model=%s "
                     "attempt=%d/%d sleeping %.0fs",
@@ -1532,6 +1532,10 @@ def split_jobs_into_batches(
         minimum=1,
         maximum=64,
     )
+
+    # Groq free-tier rate limits require fewer, larger batches.
+    if batch_size < 16:
+        batch_size = 16
 
     return [
         dossier_jobs[
