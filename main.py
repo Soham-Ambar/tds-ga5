@@ -19,7 +19,10 @@ app = FastAPI(
 
 @app.on_event("startup")
 def seed_redteam_files() -> None:
-    create_required_files()
+    try:
+        create_required_files()
+    except (PermissionError, FileNotFoundError, OSError):
+        pass
 
 
 app.include_router(proration_router)

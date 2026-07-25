@@ -201,7 +201,10 @@ def ensure_required_safe_file(
     return False
 
 
-create_required_files()
+try:
+    create_required_files()
+except (PermissionError, FileNotFoundError, OSError):
+    pass
 
 
 # ============================================================
