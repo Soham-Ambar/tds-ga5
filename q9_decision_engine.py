@@ -14,11 +14,11 @@ import httpx
 logger = logging.getLogger(__name__)
 _provider_diagnostic_done = False
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(levelname)s %(name)s %(message)s",
-    force=True,
-)
+if not logging.root.handlers:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(levelname)s %(name)s %(message)s",
+    )
 
 
 PROFILE = "ga5-mailroom-action-gate/v2"

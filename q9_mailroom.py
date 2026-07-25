@@ -36,11 +36,11 @@ from q9_decision_engine import (
 
 logger = logging.getLogger(__name__)
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(levelname)s %(name)s %(message)s",
-    force=True,
-)
+if not logging.root.handlers:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(levelname)s %(name)s %(message)s",
+    )
 
 
 def safe_validation_errors(
@@ -2180,13 +2180,12 @@ def _make_503_detail(
     if isinstance(error, AIProviderError):
         provider_status = getattr(error, "status_code", None)
 
-    detail: dict[str, Any] = {
+    return {
         "detail": "AI provider failure",
         "error_type": type(error).__name__,
         "provider_status": provider_status,
-        "reason": str(error)[:300],
+        "reason": "The external decision provider could not complete.",
     }
-    return detail
 
 
 @router.post("/mailroom-agent")
