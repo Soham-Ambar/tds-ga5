@@ -3,10 +3,11 @@ from __future__ import annotations
 import base64
 import binascii
 import os
+import posixpath
 import re
 import shlex
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from fastapi import APIRouter, Body
 from pydantic import BaseModel
@@ -64,15 +65,31 @@ def block(reason: str) -> dict[str, str]:
 # Path handling
 # -------------------------------------------------------------------
 
-def expand_agent_home(value: str) -> str:
+def repeatedly_url_decode(value: str, maximum_rounds: int = 5) -> str:
     """
-    Expand the forms of the agent home directory that commonly appear
-    in shell commands.
+    Decode URL-encoded characters repeatedly.
 
     Examples:
-        $HOME/credentials.env
-        ${HOME}/credentials.env
-        ~/credentials.env
+        %2e%2e       -> ..
+        %252e%252e   -> ..
+    """
+
+    decoded = value
+
+    for _ in range(maximum_rounds):
+        new_value = unquote(decoded)
+
+        if new_value == decoded:
+            break
+
+        decoded = new_value
+
+    return decoded
+
+
+def expand_agent_home(value: str) -> str:
+    """
+    Expand supported representations of the agent's home directory.
     """
 
     expanded = value
@@ -82,7 +99,7 @@ def expand_agent_home(value: str) -> str:
 
     if expanded == "~":
         expanded = AGENT_HOME
-    elif expanded.startswith("~/"):
+    elif expanded.startswith("~/") or expanded.startswith("~\\"):
         expanded = AGENT_HOME + expanded[1:]
 
     return expanded
@@ -90,21 +107,15 @@ def expand_agent_home(value: str) -> str:
 
 def clean_path_token(value: str) -> str:
     """
-    Remove shell punctuation surrounding a path.
-
-    Example:
-        '/tmp/file.txt;'  -> '/tmp/file.txt'
-        '"/tmp/a.txt"'   -> '/tmp/a.txt'
+    Remove surrounding shell punctuation without removing path traversal.
     """
 
     value = value.strip()
 
-    # Remove matching outer quotes.
     if len(value) >= 2:
         if value[0] == value[-1] and value[0] in {"'", '"'}:
             value = value[1:-1]
 
-    # Remove punctuation normally placed around shell arguments.
     value = value.strip(" \t\r\n,;|&()<>")
 
     return value
@@ -115,32 +126,58 @@ def normalize_path(
     working_directory: str = AGENT_WORKSPACE,
 ) -> str:
     """
-    Expand and normalize a path without touching the real filesystem.
+    Convert a supplied path into one canonical POSIX path.
 
-    Relative paths are resolved from /home/agent/workspace.
-
-    Examples:
-        ../credentials.env
-          -> /home/agent/credentials.env
-
-        /srv/reports/a/../final.txt
-          -> /srv/reports/final.txt
+    This handles:
+      - $HOME and ${HOME}
+      - tilde paths
+      - relative paths
+      - ordinary ../ traversal
+      - Windows-style backslashes
+      - URL-encoded traversal
+      - repeatedly encoded traversal
+      - duplicate separators
     """
 
+    if not isinstance(path, str):
+        return ""
+
     path = clean_path_token(path)
-    path = expand_agent_home(path)
 
     if not path:
         return ""
 
-    if os.path.isabs(path):
-        normalized = os.path.normpath(path)
-    else:
-        normalized = os.path.normpath(
-            os.path.join(working_directory, path)
-        )
+    # A NUL character must never appear in a filesystem path.
+    if "\x00" in path:
+        return ""
 
-    return normalized.replace("\\", "/")
+    path = repeatedly_url_decode(path)
+    path = expand_agent_home(path)
+
+    # Interpret backslashes as path separators too. This prevents a caller
+    # from hiding traversal as:
+    # /srv/reports\..\secret.txt
+    path = path.replace("\\", "/")
+
+    # Remove NUL characters introduced through URL decoding, such as %00.
+    if "\x00" in path:
+        return ""
+
+    working_directory = working_directory.replace("\\", "/")
+    working_directory = posixpath.normpath(working_directory)
+
+    if path.startswith("/"):
+        combined = path
+    else:
+        combined = posixpath.join(working_directory, path)
+
+    normalized = posixpath.normpath(combined)
+
+    # Ensure every successful canonical path is absolute.
+    if not normalized.startswith("/"):
+        normalized = "/" + normalized
+
+    return normalized
 
 
 def path_is_exactly_forbidden(path: str) -> bool:
@@ -154,31 +191,31 @@ def path_is_exactly_forbidden(path: str) -> bool:
 
 def path_is_inside_allowed_write_directory(path: str) -> bool:
     """
-    Return True only when the normalized path is inside /srv/reports.
+    Allow a file only when its canonical parent location is underneath
+    /srv/reports.
 
-    os.path.commonpath prevents prefix attacks such as:
-
-        /srv/reports-evil/file.txt
-        /srv/reports/../secrets.txt
+    Merely sharing the same text prefix is insufficient.
     """
 
     normalized = normalize_path(path)
+    allowed_root = posixpath.normpath(ALLOWED_WRITE_DIRECTORY)
 
     if not normalized:
         return False
 
-    allowed_normalized = os.path.normpath(
-        ALLOWED_WRITE_DIRECTORY
-    ).replace("\\", "/")
+    # write_file should receive a file inside the directory, not the report
+    # directory itself as the destination file.
+    if normalized == allowed_root:
+        return False
 
     try:
-        common = os.path.commonpath(
-            [normalized, allowed_normalized]
-        ).replace("\\", "/")
+        common = posixpath.commonpath(
+            [normalized, allowed_root]
+        )
     except ValueError:
         return False
 
-    return common == allowed_normalized
+    return common == allowed_root
 
 
 # -------------------------------------------------------------------
@@ -459,7 +496,7 @@ def extract_common_write_paths(command: str) -> list[str]:
 
 def bash_write_is_allowed(command: str) -> tuple[bool, str]:
     """
-    Block common Bash writes outside /srv/reports.
+    Block detected Bash writes outside /srv/reports.
     """
 
     paths_to_check = extract_common_write_paths(command)
@@ -467,7 +504,10 @@ def bash_write_is_allowed(command: str) -> tuple[bool, str]:
     for path in paths_to_check:
         normalized = normalize_path(path)
 
-        # Special shell destinations are not normal file writes.
+        if not normalized:
+            return False, path
+
+        # These are shell output devices, not normal persistent files.
         if normalized in {
             "/dev/null",
             "/dev/stdout",
@@ -476,7 +516,7 @@ def bash_write_is_allowed(command: str) -> tuple[bool, str]:
             continue
 
         if not path_is_inside_allowed_write_directory(path):
-            return False, normalized or path
+            return False, normalized
 
     return True, ""
 
@@ -521,6 +561,9 @@ def evaluate_write_file(path: Any) -> dict[str, str]:
         return block("A non-empty file path is required.")
 
     normalized = normalize_path(path)
+
+    if not normalized:
+        return block("The supplied file path is invalid.")
 
     if normalized == FORBIDDEN_CREDENTIALS_FILE:
         return block(

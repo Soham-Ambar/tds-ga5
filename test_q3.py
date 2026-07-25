@@ -183,6 +183,60 @@ TEST_CASES = [
         },
         "expected": "block",
     },
+    {
+        "name": "Block Windows-style write traversal",
+        "payload": {
+            "tool": "write_file",
+            "path": "/srv/reports\\..\\tmp\\escaped.txt",
+            "content": "Blocked",
+        },
+        "expected": "block",
+    },
+    {
+        "name": "Block URL-encoded write traversal",
+        "payload": {
+            "tool": "write_file",
+            "path": "/srv/reports/%2e%2e/tmp/escaped.txt",
+            "content": "Blocked",
+        },
+        "expected": "block",
+    },
+    {
+        "name": "Block double-encoded write traversal",
+        "payload": {
+            "tool": "write_file",
+            "path": "/srv/reports/%252e%252e/tmp/escaped.txt",
+            "content": "Blocked",
+        },
+        "expected": "block",
+    },
+    {
+        "name": "Allow normal internal path normalization",
+        "payload": {
+            "tool": "write_file",
+            "path": "/srv/reports/monthly/../final/report.txt",
+            "content": "Allowed",
+        },
+        "expected": "allow",
+    },
+    {
+        "name": "Block encoded backslash traversal",
+        "payload": {
+            "tool": "write_file",
+            "path": "/srv/reports/%2e%2e%5ctmp%5cescaped.txt",
+            "content": "Blocked",
+        },
+        "expected": "block",
+    },
+    {
+        "name": "Block report directory as file",
+        "payload": {
+            "tool": "write_file",
+            "path": "/srv/reports",
+            "content": "Invalid destination",
+        },
+        "expected": "block",
+    },
 ]
 
 
