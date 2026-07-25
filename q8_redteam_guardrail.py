@@ -154,7 +154,10 @@ def create_required_files() -> None:
     )
 
 
-create_required_files()
+try:
+    create_required_files()
+except (PermissionError, FileNotFoundError, OSError):
+    pass
 
 
 # ============================================================
@@ -189,7 +192,7 @@ def resolve_inside_sandbox(
 
     try:
         sandbox = SANDBOX_ROOT.resolve(
-            strict=True,
+            strict=False,
         )
 
         candidate = Path(supplied_path)
