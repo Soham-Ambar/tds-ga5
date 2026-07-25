@@ -1214,7 +1214,7 @@ def call_provider_once(
 
     maximum_tokens = env_int(
         "MAILROOM_AI_MAX_TOKENS",
-        default=8000,
+        default=4000,
         minimum=1000,
         maximum=32000,
     )
@@ -1534,8 +1534,8 @@ def split_jobs_into_batches(
     )
 
     # Groq free-tier rate limits require fewer, larger batches.
-    if batch_size < 64:
-        batch_size = 64
+    if batch_size < 32:
+        batch_size = 32
 
     return [
         dossier_jobs[
