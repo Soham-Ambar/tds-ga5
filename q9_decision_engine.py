@@ -1534,8 +1534,8 @@ def split_jobs_into_batches(
     )
 
     # Groq free-tier rate limits require fewer, larger batches.
-    if batch_size < 32:
-        batch_size = 32
+    if batch_size < 64:
+        batch_size = 64
 
     return [
         dossier_jobs[
