@@ -379,21 +379,45 @@ def parse_and_validate_url(
     url: str,
 ) -> tuple[bool, str, str | None]:
     """
-    Perform syntax and exact-host validation before any network request.
+    Strictly validate one URL before any network activity.
+
+    Allowed examples:
+        https://example.com/
+        http://example.com/path
+        https://www.iana.org/domains
+
+    Blocked examples:
+        https://example.com.evil.test/
+        https://example.com@127.0.0.1/
+        https://example.com\\@127.0.0.1/
+        https://example.com:22/
+        https://example.com./
+        https://%65xample.com/
     """
 
     if not isinstance(url, str) or not url:
         return False, "A non-empty URL is required.", None
 
-    if any(character in url for character in "\r\n\x00"):
+    # Do not silently trim or repair attacker-controlled URLs.
+    if url != url.strip():
+        return False, "Leading or trailing URL whitespace is not permitted.", None
+
+    # Reject control characters and browser/parser-confusion characters.
+    if any(character in url for character in "\r\n\t\x00"):
         return False, "The URL contains invalid control characters.", None
+
+    # Backslashes may be interpreted differently by URL parsers and browsers.
+    if "\\" in url:
+        return False, "Backslashes are not permitted in URLs.", None
 
     try:
         parsed = urlsplit(url)
     except ValueError:
         return False, "The URL is malformed.", None
 
-    if parsed.scheme not in {"http", "https"}:
+    scheme = parsed.scheme.lower()
+
+    if scheme not in {"http", "https"}:
         return (
             False,
             "Only HTTP and HTTPS URLs are permitted.",
@@ -401,11 +425,30 @@ def parse_and_validate_url(
         )
 
     if not parsed.netloc:
-        return False, "The URL has no hostname.", None
+        return False, "The URL has no authority component.", None
 
-    # This blocks:
-    # https://example.com@evil.com/
+    # Reject percent-encoded authority tricks such as:
+    # https://%65xample.com/
+    #
+    # Percent encoding is appropriate in paths and queries, but we do not
+    # need it in either of the two exact allowed hostnames.
+    if "%" in parsed.netloc:
+        return (
+            False,
+            "Percent encoding is not permitted in the URL authority.",
+            None,
+        )
+
+    # Explicitly reject userinfo:
+    # https://example.com@evil.test/
     # https://user:password@example.com/
+    if "@" in parsed.netloc:
+        return (
+            False,
+            "URLs containing user information are not permitted.",
+            None,
+        )
+
     if parsed.username is not None or parsed.password is not None:
         return (
             False,
@@ -418,10 +461,27 @@ def parse_and_validate_url(
     if raw_hostname is None:
         return False, "The URL has no valid hostname.", None
 
-    hostname = normalize_hostname(raw_hostname)
+    # The policy allows two exact ASCII hostnames, so reject Unicode authority
+    # text rather than attempting to interpret lookalike characters.
+    try:
+        parsed.netloc.encode("ascii")
+    except UnicodeEncodeError:
+        return (
+            False,
+            "Unicode hostname lookalikes are not permitted.",
+            None,
+        )
 
-    if hostname is None:
-        return False, "The hostname is invalid.", None
+    hostname = raw_hostname.lower()
+
+    # Do not accept trailing-dot variants because the assignment says exact
+    # hosts, not DNS-equivalent representations.
+    if hostname.endswith("."):
+        return (
+            False,
+            "The hostname must exactly match the allowlist.",
+            None,
+        )
 
     if hostname not in ALLOWED_HOSTS:
         return (
@@ -435,8 +495,29 @@ def parse_and_validate_url(
     except ValueError:
         return False, "The URL contains an invalid port.", None
 
-    if port is not None and not 1 <= port <= 65535:
-        return False, "The URL contains an invalid port.", None
+    # Permit only each scheme's normal port. This prevents using an allowed
+    # hostname as a gateway to arbitrary services.
+    expected_port = 443 if scheme == "https" else 80
+
+    if port is not None and port != expected_port:
+        return (
+            False,
+            "Only the default port for the selected URL scheme is permitted.",
+            None,
+        )
+
+    # Verify the complete authority is exactly one allowed representation.
+    allowed_authorities = {
+        hostname,
+        f"{hostname}:{expected_port}",
+    }
+
+    if parsed.netloc.lower() not in allowed_authorities:
+        return (
+            False,
+            "The URL authority is ambiguous or not permitted.",
+            None,
+        )
 
     return True, "URL syntax and hostname are allowed.", hostname
 
@@ -536,6 +617,79 @@ async def validate_network_target(
     return True, "The URL host is allowed and resolves only publicly."
 
 
+def validate_prepared_httpx_request(
+    client: httpx.AsyncClient,
+    url: str,
+) -> tuple[bool, str, httpx.Request | None]:
+    """
+    Confirm that HTTPX interprets the URL exactly as our guardrail did.
+    """
+
+    try:
+        request = client.build_request(
+            "GET",
+            url,
+        )
+    except Exception:
+        return (
+            False,
+            "The HTTP client rejected the URL.",
+            None,
+        )
+
+    prepared_url = request.url
+
+    scheme = prepared_url.scheme.lower()
+    host = prepared_url.host.lower() if prepared_url.host else None
+
+    if scheme not in {"http", "https"}:
+        return (
+            False,
+            "The prepared request has a forbidden scheme.",
+            None,
+        )
+
+    if host not in ALLOWED_HOSTS:
+        return (
+            False,
+            "The prepared request has a forbidden hostname.",
+            None,
+        )
+
+    expected_port = 443 if scheme == "https" else 80
+    actual_port = prepared_url.port
+
+    if actual_port is not None and actual_port != expected_port:
+        return (
+            False,
+            "The prepared request has a forbidden port.",
+            None,
+        )
+
+    # Compare with our strict parser result.
+    parsed = urlsplit(url)
+
+    if parsed.hostname is None:
+        return (
+            False,
+            "The URL has no valid hostname.",
+            None,
+        )
+
+    if host != parsed.hostname.lower():
+        return (
+            False,
+            "URL parsers disagree about the destination hostname.",
+            None,
+        )
+
+    return (
+        True,
+        "The HTTP client destination matches the validated URL.",
+        request,
+    )
+
+
 # ============================================================
 # Safe HTTP fetching
 # ============================================================
@@ -571,10 +725,13 @@ async def execute_fetch_url(
 
     headers = {
         "User-Agent": (
-            "TDS-GA5-Guardrail/1.0 "
+            "TDS-GA5-Guardrail/1.1 "
             "(safe educational fetcher)"
         ),
-        "Accept": "text/html,text/plain,application/json;q=0.9,*/*;q=0.5",
+        "Accept": (
+            "text/html,text/plain,application/json;q=0.9,"
+            "*/*;q=0.5"
+        ),
     }
 
     try:
@@ -587,6 +744,7 @@ async def execute_fetch_url(
             for redirect_number in range(
                 MAX_REDIRECTS + 1
             ):
+                # 1. Validate syntax, exact host and allowed port.
                 target_valid, target_reason = (
                     await validate_network_target(
                         current_url
@@ -598,17 +756,35 @@ async def execute_fetch_url(
                         target_reason
                     )
 
+                # 2. Confirm HTTPX parses the same destination.
+                (
+                    prepared_valid,
+                    prepared_reason,
+                    prepared_request,
+                ) = validate_prepared_httpx_request(
+                    client,
+                    current_url,
+                )
+
+                if (
+                    not prepared_valid
+                    or prepared_request is None
+                ):
+                    return block(
+                        prepared_reason
+                    )
+
                 try:
-                    response = await client.get(
-                        current_url
+                    # Send the exact request we inspected.
+                    response = await client.send(
+                        prepared_request,
+                        follow_redirects=False,
                     )
                 except httpx.RequestError:
-                    # The target passed the guardrail but the remote site
-                    # happened to fail. It was still safe to attempt.
-                    return allow(
-                        "The URL passed all guardrail checks, but the "
-                        "remote server could not be reached.",
-                        "",
+                    # Never classify an unsuccessful or ambiguous network
+                    # operation as allowed.
+                    return block(
+                        "The validated URL could not be fetched safely."
                     )
 
                 if is_redirect_status(
@@ -619,10 +795,8 @@ async def execute_fetch_url(
                     )
 
                     if not location:
-                        return allow(
-                            "The allowed remote server returned a redirect "
-                            "without a destination.",
-                            "",
+                        return block(
+                            "The redirect response has no destination."
                         )
 
                     if redirect_number >= MAX_REDIRECTS:
@@ -630,15 +804,22 @@ async def execute_fetch_url(
                             "The URL exceeded the permitted redirect limit."
                         )
 
-                    # Convert relative redirects such as /about into a full
-                    # URL using the current safe URL.
-                    next_url = urljoin(
-                        current_url,
-                        location,
-                    )
+                    try:
+                        next_url = urljoin(
+                            str(response.request.url),
+                            location,
+                        )
+                    except Exception:
+                        return block(
+                            "The redirect destination is malformed."
+                        )
 
-                    # The next loop iteration validates the new hostname,
-                    # DNS results, userinfo and scheme before requesting it.
+                    # Do not request it yet. The next iteration repeats:
+                    # - syntax validation
+                    # - exact-host validation
+                    # - port validation
+                    # - DNS validation
+                    # - HTTPX destination comparison
                     current_url = next_url
                     continue
 
@@ -657,13 +838,12 @@ async def execute_fetch_url(
                     )
 
                 return allow(
-                    "The URL and every redirect target passed the "
-                    "host and public-address checks.",
+                    "The URL and every redirect target passed all "
+                    "host, port and public-address checks.",
                     body,
                 )
 
     except Exception:
-        # Avoid leaking internal exceptions, paths, addresses or secrets.
         return block(
             "The URL could not be fetched safely."
         )

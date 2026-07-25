@@ -203,6 +203,78 @@ TEST_CASES = [
         },
         "expected_action": "block",
     },
+    {
+        "name": "Block unexpected HTTPS port",
+        "tool": "fetch_url",
+        "arguments": {
+            "url": "https://example.com:444/",
+        },
+        "expected_action": "block",
+    },
+    {
+        "name": "Block HTTP service port",
+        "tool": "fetch_url",
+        "arguments": {
+            "url": "http://example.com:8080/",
+        },
+        "expected_action": "block",
+    },
+    {
+        "name": "Block backslash userinfo confusion",
+        "tool": "fetch_url",
+        "arguments": {
+            "url": "https://example.com\\@127.0.0.1/",
+        },
+        "expected_action": "block",
+    },
+    {
+        "name": "Block backslash host confusion",
+        "tool": "fetch_url",
+        "arguments": {
+            "url": "https://example.com\\evil.test/",
+        },
+        "expected_action": "block",
+    },
+    {
+        "name": "Block encoded hostname",
+        "tool": "fetch_url",
+        "arguments": {
+            "url": "https://%65xample.com/",
+        },
+        "expected_action": "block",
+    },
+    {
+        "name": "Block trailing-dot hostname",
+        "tool": "fetch_url",
+        "arguments": {
+            "url": "https://example.com./",
+        },
+        "expected_action": "block",
+    },
+    {
+        "name": "Block whitespace-prefixed URL",
+        "tool": "fetch_url",
+        "arguments": {
+            "url": " https://example.com/",
+        },
+        "expected_action": "block",
+    },
+    {
+        "name": "Allow explicit normal HTTPS port",
+        "tool": "fetch_url",
+        "arguments": {
+            "url": "https://example.com:443/",
+        },
+        "expected_action": "allow",
+    },
+    {
+        "name": "Allow explicit normal HTTP port",
+        "tool": "fetch_url",
+        "arguments": {
+            "url": "http://example.com:80/",
+        },
+        "expected_action": "allow",
+    },
 ]
 
 
