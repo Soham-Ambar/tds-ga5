@@ -9,6 +9,7 @@ from q8_redteam_guardrail import (
     router as redteam_guardrail_router,
     create_required_files,
 )
+from q9_mailroom import router as mailroom_router
 
 
 app = FastAPI(
@@ -31,6 +32,7 @@ app.include_router(skill_scanner_router)
 app.include_router(run_control_router)
 app.include_router(mcp_router)
 app.include_router(redteam_guardrail_router)
+app.include_router(mailroom_router)
 
 
 @app.get("/")
@@ -44,6 +46,7 @@ def root():
             "POST /run-control",
             "POST /mcp",
             "POST /redteam-guardrail",
+            "POST /mailroom-agent",
         ],
     }
 
