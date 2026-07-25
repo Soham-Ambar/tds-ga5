@@ -283,6 +283,18 @@ def execute_read_file(
         )
 
         if not restored:
+            # When the filesystem is not writable (e.g. Render), serve the
+            # three known safe files directly from the in-memory dictionary.
+            for required_path, required_content in REQUIRED_SAFE_FILES.items():
+                if resolved_path == required_path.resolve(
+                    strict=False,
+                ):
+                    return allow(
+                        "The canonical file path is inside the "
+                        "permitted sandbox.",
+                        required_content,
+                    )
+
             return block(
                 "The requested file does not exist inside the sandbox."
             )
