@@ -1,12 +1,18 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import time
 from typing import Any, Callable
+from urllib.parse import urlparse
 
 import httpx
+
+
+logger = logging.getLogger(__name__)
+_provider_diagnostic_done = False
 
 
 PROFILE = "ga5-mailroom-action-gate/v2"
@@ -1146,6 +1152,17 @@ def call_provider_once(
     api_url, api_key, model = (
         provider_configuration()
     )
+
+    global _provider_diagnostic_done
+    if not _provider_diagnostic_done:
+        hostname = urlparse(api_url).hostname or "unknown"
+        logger.info(
+            "provider hostname=%s model=%s key_present=%s",
+            hostname,
+            model,
+            "yes" if api_key else "no",
+        )
+        _provider_diagnostic_done = True
 
     headers = {
         "Content-Type": "application/json",
