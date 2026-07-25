@@ -5,6 +5,7 @@ from q3_guardrail import router as guardrail_router
 from q4_skill_scanner import router as skill_scanner_router
 from q5_run_control import router as run_control_router
 from q6_mcp_server import router as mcp_router
+from q8_redteam_guardrail import router as redteam_guardrail_router
 
 
 app = FastAPI(
@@ -18,6 +19,7 @@ app.include_router(guardrail_router)
 app.include_router(skill_scanner_router)
 app.include_router(run_control_router)
 app.include_router(mcp_router)
+app.include_router(redteam_guardrail_router)
 
 
 @app.get("/")
@@ -30,6 +32,7 @@ def root():
             "POST /skill-scan",
             "POST /run-control",
             "POST /mcp",
+            "POST /redteam-guardrail",
         ],
     }
 
