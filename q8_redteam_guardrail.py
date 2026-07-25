@@ -410,6 +410,11 @@ def parse_and_validate_url(
     if "\\" in url:
         return False, "Backslashes are not permitted in URLs.", None
 
+    # Fragments have no legitimate use for our two allowed hosts and can
+    # create ambiguity between URL parsers.
+    if "#" in url:
+        return False, "URL fragments are not permitted.", None
+
     try:
         parsed = urlsplit(url)
     except ValueError:
@@ -598,10 +603,11 @@ async def validate_network_target(
         return False, reason
 
     parsed = urlsplit(url)
+    scheme = parsed.scheme.lower()
 
     if parsed.port is not None:
         port = parsed.port
-    elif parsed.scheme == "https":
+    elif scheme == "https":
         port = 443
     else:
         port = 80
