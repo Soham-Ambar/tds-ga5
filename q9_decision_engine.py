@@ -1533,9 +1533,10 @@ def split_jobs_into_batches(
         maximum=64,
     )
 
-    # Groq free-tier rate limits require fewer, larger batches.
-    if batch_size < 32:
-        batch_size = 32
+    # Smaller batches reduce schema-violation risk for smaller models.
+    # With 8 dossiers per batch, the model produces more reliable output.
+    if batch_size > 8:
+        batch_size = 8
 
     return [
         dossier_jobs[
