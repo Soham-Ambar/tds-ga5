@@ -21,6 +21,13 @@ logger = logging.getLogger(__name__)
 
 _ai_diagnostic_done = False
 
+logger.info(
+    "q10 startup AI_API_BASE=%s AI_MODEL=%s key_present=%s",
+    os.environ.get("AI_API_BASE", "") or "(empty)",
+    os.environ.get("AI_MODEL", "") or "(empty)",
+    "yes" if os.environ.get("AI_API_KEY", "") else "no",
+)
+
 Q10_DB_PATH = os.environ.get("Q10_DB_PATH", "q10_a2a.sqlite3")
 _Q10_IS_MEMORY = Q10_DB_PATH == ":memory:"
 A2A_BASE_URL = os.environ.get("A2A_BASE_URL", "").rstrip("/")
