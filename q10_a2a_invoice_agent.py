@@ -26,20 +26,40 @@ _Q10_IS_MEMORY = Q10_DB_PATH == ":memory:"
 A2A_BASE_URL = os.environ.get("A2A_BASE_URL", "").rstrip("/")
 _RENDER_BASE = "https://tds-ga5-wpyi.onrender.com"
 A2A_BEARER_TOKEN = os.environ.get("A2A_BEARER_TOKEN", "ga5-invoice-token")
-AI_API_BASE = os.environ.get("AI_API_BASE", "").rstrip("/")
 AI_API_KEY = os.environ.get("AI_API_KEY", "")
 AI_MODEL = os.environ.get("AI_MODEL", "")
 AI_TIMEOUT_SECONDS = int(os.environ.get("AI_TIMEOUT_SECONDS", "60") or "60")
 
 
+def _find_env(*names: str, default: str = "") -> str:
+    for n in names:
+        v = os.environ.get(n, "")
+        if v:
+            return v
+    p = Path(".env")
+    if p.is_file():
+        try:
+            for line in p.read_text("utf-8").splitlines():
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, _, v = line.partition("=")
+                k = k.strip()
+                v = v.strip().strip("\"'")
+                if k in names and v:
+                    return v
+        except OSError:
+            pass
+    return default
+
+
 def _ai_env() -> tuple[str, str, str, int]:
-    """Read AI env vars at call time to ensure Render runtime env is picked up."""
-    base = os.environ.get("ai_api_base", "") or os.environ.get("AI_API_BASE", AI_API_BASE)
-    key = os.environ.get("ai_api_key", "") or os.environ.get("AI_API_KEY", AI_API_KEY)
-    model = os.environ.get("ai_model", "") or os.environ.get("AI_MODEL", AI_MODEL)
-    timeout_str = os.environ.get("ai_timeout_seconds", "") or os.environ.get("AI_TIMEOUT_SECONDS", str(AI_TIMEOUT_SECONDS))
+    base = _find_env("AI_API_BASE", "ai_api_base").rstrip("/")
+    key = _find_env("AI_API_KEY", "ai_api_key")
+    model = _find_env("AI_MODEL", "ai_model")
+    timeout_str = _find_env("AI_TIMEOUT_SECONDS", "ai_timeout_seconds", default=str(AI_TIMEOUT_SECONDS))
     timeout = int(timeout_str) if timeout_str and timeout_str.strip() else AI_TIMEOUT_SECONDS
-    return base.rstrip("/"), key, model, timeout
+    return base, key, model, timeout
 
 ALLOWED_ACTIONS = frozenset({
     "settle_invoice",
