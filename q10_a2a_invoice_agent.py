@@ -29,7 +29,7 @@ A2A_BEARER_TOKEN = os.environ.get("A2A_BEARER_TOKEN", "ga5-invoice-token")
 AI_API_BASE = os.environ.get("AI_API_BASE", "").rstrip("/")
 AI_API_KEY = os.environ.get("AI_API_KEY", "")
 AI_MODEL = os.environ.get("AI_MODEL", "")
-AI_TIMEOUT_SECONDS = int(os.environ.get("AI_TIMEOUT_SECONDS", "30") or "30")
+AI_TIMEOUT_SECONDS = int(os.environ.get("AI_TIMEOUT_SECONDS", "60") or "60")
 
 ALLOWED_ACTIONS = frozenset({
     "settle_invoice",
