@@ -24,6 +24,7 @@ _ai_diagnostic_done = False
 Q10_DB_PATH = os.environ.get("Q10_DB_PATH", "q10_a2a.sqlite3")
 _Q10_IS_MEMORY = Q10_DB_PATH == ":memory:"
 A2A_BASE_URL = os.environ.get("A2A_BASE_URL", "").rstrip("/")
+_RENDER_BASE = "https://tds-ga5-wpyi.onrender.com"
 A2A_BEARER_TOKEN = os.environ.get("A2A_BEARER_TOKEN", "ga5-invoice-token")
 AI_API_BASE = os.environ.get("AI_API_BASE", "").rstrip("/")
 AI_API_KEY = os.environ.get("AI_API_KEY", "")
@@ -248,10 +249,11 @@ def check_a2a_version_header(headers: dict[str, str]) -> None:
 
 @router.get("/.well-known/agent-card.json")
 async def agent_card():
-    base_url = A2A_BASE_URL
+    base_url = A2A_BASE_URL or _RENDER_BASE
+    a2a_url = base_url.rstrip("/") + "/a2a/"
     iface = {"protocolBinding": "HTTP+JSON", "protocolVersion": "1.0"}
-    if base_url:
-        iface["url"] = base_url
+    if a2a_url:
+        iface["url"] = a2a_url
     return {
         "name": "TDS GA5 Invoice Action Agent",
         "version": "1.0.0",
@@ -380,15 +382,27 @@ async def message_send(request: Request):
                         detail={"error": {"code": "IDEMPOTENCY_CONFLICT", "message": "messageId reused with different content."}},
                     )
 
-            if media_type == BATCH_CONTENT_TYPE:
-                return await _handle_initial_message(conn, principal, message, message_id, message_hash, data)
-            elif media_type == RESULTS_CONTENT_TYPE:
-                return await _handle_results_message(conn, principal, message, message_id, message_hash, data)
-            else:
-                raise HTTPException(
-                    status_code=400,
-                    detail={"error": {"code": "UNSUPPORTED_MEDIA_TYPE", "message": f"Unsupported mediaType: {media_type}."}},
+            try:
+                if media_type == BATCH_CONTENT_TYPE:
+                    return await _handle_initial_message(conn, principal, message, message_id, message_hash, data)
+                elif media_type == RESULTS_CONTENT_TYPE:
+                    return await _handle_results_message(conn, principal, message, message_id, message_hash, data)
+                else:
+                    raise HTTPException(
+                        status_code=400,
+                        detail={"error": {"code": "UNSUPPORTED_MEDIA_TYPE", "message": f"Unsupported mediaType: {media_type}."}},
+                    )
+            except RuntimeError as exc:
+                hostname = urlparse(AI_API_BASE).hostname or "unknown"
+                model = AI_MODEL or "unknown"
+                logger.error(
+                    "ai_error hostname=%s model=%s error=%s",
+                    hostname, model, str(exc),
                 )
+                raise HTTPException(
+                    status_code=503,
+                    detail={"error": {"code": "AI_PROVIDER_ERROR", "message": "AI provider could not complete the request."}},
+                ) from exc
 
 
 async def _handle_initial_message(
@@ -788,17 +802,13 @@ async def _call_ai_for_proposals(
     ]
 
     use_fake = os.environ.get("Q10_FAKE_AI", "").strip() == "1"
-    ai_base_missing = not AI_API_BASE
-    ai_model_missing = not AI_MODEL
-    if use_fake or ai_base_missing or ai_model_missing:
-        if not use_fake:
-            logger.info(
-                "AI not configured (base=%s model=%s), using deterministic mode",
-                "set" if AI_API_BASE else "missing",
-                "set" if AI_MODEL else "missing",
-            )
+    if use_fake:
         raw_proposals = _fake_ai_proposals(jobs, batch_id)
     else:
+        if not AI_API_BASE:
+            raise RuntimeError("AI_API_BASE is not configured.")
+        if not AI_MODEL:
+            raise RuntimeError("AI_MODEL is not configured.")
         text = await _call_ai_provider(messages)
         raw_proposals = _parse_ai_response(text, len(jobs))
 

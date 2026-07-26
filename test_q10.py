@@ -73,6 +73,9 @@ def test_agent_card():
     check(isinstance(data.get("skills"), list) and len(data["skills"]) > 0, "skills is non-empty")
     check(data["skills"][0]["name"] == "invoice_action_agent", "first skill is invoice_action_agent")
     check(isinstance(data.get("supportedInterfaces"), list), "supportedInterfaces present")
+    if data.get("supportedInterfaces"):
+        si = data["supportedInterfaces"][0]
+        check(si.get("url") == "http://localhost:8000/a2a/", "supportedInterfaces.url is correct")
     check(isinstance(data.get("defaultInputModes"), list), "defaultInputModes present")
     check(isinstance(data.get("defaultOutputModes"), list), "defaultOutputModes present")
     check(BATCH_CT in data["defaultInputModes"], "defaultInputModes contains batch content type")
