@@ -32,6 +32,7 @@ def build_initial_state(
     incoming_trace_id: str,
     incoming_span_id: str | None,
     incoming_tracestate: str | None,
+    model_name: str = "gpt-4",
 ) -> dict[str, Any]:
     run_id = request.runId
     public_marker = request.publicMarker
@@ -75,7 +76,7 @@ def build_initial_state(
             "ga5.run.id": run_id,
             "ga5.public.marker": public_marker,
             "gen_ai.operation.name": "chat",
-            "gen_ai.request.model": _find_env("AI_MODEL", default="gpt-4"),
+            "gen_ai.request.model": model_name,
         },
     )
 
@@ -223,23 +224,6 @@ def build_initial_state(
     }
 
     return state
-
-
-def _find_env(*names: str, default: str = "") -> str:
-    import os
-    for name in names:
-        val = os.environ.get(name)
-        if val:
-            return val
-        upper = name.upper()
-        val = os.environ.get(upper)
-        if val:
-            return val
-        lower = name.lower()
-        val = os.environ.get(lower)
-        if val:
-            return val
-    return default
 
 
 def _make_execute_span_from_dispatch(

@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
-import re
 from typing import Any
 
 import httpx
@@ -17,32 +17,130 @@ class PlannerOutputError(ValueError):
     pass
 
 
-def _find_env(*names: str, default: str = "") -> str:
-    for name in names:
-        val = os.environ.get(name)
-        if val:
-            return val
-        upper = name.upper()
-        val = os.environ.get(upper)
-        if val:
-            return val
-        lower = name.lower()
-        val = os.environ.get(lower)
-        if val:
-            return val
-    return default
+class AIProviderError(RuntimeError):
+    pass
 
 
-def _ai_env() -> tuple[str, str, str]:
-    api_base = _find_env("AI_API_BASE", default="https://api.openai.com/v1")
-    api_key = _find_env("AI_API_KEY")
-    if not api_key:
-        raise RuntimeError("AI_API_KEY not configured")
-    model = _find_env("AI_MODEL", default="gpt-4")
-    return api_base, api_key, model
+class AIProviderRateLimit(AIProviderError):
+    pass
 
 
-def _build_planner_prompt(request: CreateIncidentRequest) -> list[dict[str, str]]:
+class AIProviderTimeout(AIProviderError):
+    pass
+
+
+class PlannerResponseError(AIProviderError):
+    pass
+
+
+def _get_env(name: str) -> str:
+    return (os.environ.get(name) or os.environ.get(name.upper()) or os.environ.get(name.lower()) or "").strip()
+
+
+def configured_providers() -> list[dict[str, str]]:
+    providers: list[dict[str, str]] = []
+
+    primary_base = _get_env("AI_API_BASE")
+    primary_key = _get_env("AI_API_KEY")
+    primary_model = _get_env("AI_MODEL")
+    if primary_base and primary_key and primary_model:
+        providers.append({
+            "name": "primary",
+            "base_url": primary_base,
+            "api_key": primary_key,
+            "model": primary_model,
+        })
+
+    fallback_base = _get_env("AI_FALLBACK_API_BASE")
+    fallback_key = _get_env("AI_FALLBACK_API_KEY")
+    fallback_model = _get_env("AI_FALLBACK_MODEL")
+    if fallback_base and fallback_key and fallback_model:
+        providers.append({
+            "name": "fallback",
+            "base_url": fallback_base,
+            "api_key": fallback_key,
+            "model": fallback_model,
+        })
+
+    second_base = _get_env("AI_SECOND_FALLBACK_API_BASE")
+    second_key = _get_env("AI_SECOND_FALLBACK_API_KEY")
+    second_model = _get_env("AI_SECOND_FALLBACK_MODEL")
+    if second_base and second_key and second_model:
+        providers.append({
+            "name": "second-fallback",
+            "base_url": second_base,
+            "api_key": second_key,
+            "model": second_model,
+        })
+
+    return providers
+
+
+def extract_json_object(text: str) -> dict[str, Any]:
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        lines = cleaned.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        cleaned = "\n".join(lines).strip()
+    try:
+        value = json.loads(cleaned)
+    except json.JSONDecodeError as exc:
+        raise PlannerResponseError(f"Planner returned invalid JSON: {exc}") from exc
+    if not isinstance(value, dict):
+        raise PlannerResponseError("Planner response must be a JSON object")
+    return value
+
+
+async def call_openai_compatible(
+    *,
+    base_url: str,
+    api_key: str,
+    model: str,
+    system_prompt: str,
+    user_payload: dict[str, Any],
+    timeout_seconds: float = 12.0,
+) -> tuple[dict[str, Any], str]:
+    url = f"{base_url.rstrip('/')}/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": model,
+        "temperature": 0,
+        "response_format": {"type": "json_object"},
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {
+                "role": "user",
+                "content": json.dumps(user_payload, ensure_ascii=False, separators=(",", ":")),
+            },
+        ],
+    }
+    timeout = httpx.Timeout(timeout_seconds, connect=3.0)
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.post(url, headers=headers, json=payload)
+    except httpx.TimeoutException as exc:
+        raise AIProviderTimeout(f"Provider timed out for model {model}") from exc
+    except httpx.HTTPError as exc:
+        raise AIProviderError(f"Provider connection failed for model {model}") from exc
+    if response.status_code == 429:
+        raise AIProviderRateLimit(f"Provider rate-limited model {model}")
+    if response.status_code >= 400:
+        raise AIProviderError(f"Provider returned HTTP {response.status_code}")
+    try:
+        body = response.json()
+        text = body["choices"][0]["message"]["content"]
+    except (ValueError, KeyError, IndexError, TypeError) as exc:
+        raise PlannerResponseError("Provider returned an unexpected response") from exc
+    return extract_json_object(text), model
+
+
+def _build_planner_payload(request: CreateIncidentRequest) -> tuple[str, dict[str, Any]]:
     tool_catalog_safe = [
         {
             "name": t.name,
@@ -82,72 +180,65 @@ def _build_planner_prompt(request: CreateIncidentRequest) -> list[dict[str, str]
         "Return JSON matching the supplied schema. Do not return markdown."
     )
 
-    schema = {
-        "type": "object",
-        "properties": {
-            "rootCause": {"type": "string"},
-            "evidence": {"type": "array", "items": {"type": "string"}},
-            "diagnostics": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "toolName": {"type": "string"},
-                        "arguments": {"type": "object"},
-                        "evidence": {"type": "array", "items": {"type": "string"}},
-                    },
-                    "required": ["toolName", "arguments", "evidence"],
-                },
-            },
-            "effectPlan": {
-                "type": "object",
-                "properties": {
-                    "toolName": {"type": "string"},
-                    "arguments": {"type": "object"},
-                    "dependsOnDiagnostics": {"type": "boolean"},
-                },
-                "required": ["toolName", "arguments", "dependsOnDiagnostics"],
-            },
-        },
-        "required": ["rootCause", "evidence", "diagnostics", "effectPlan"],
-    }
-
-    user_message = json.dumps({
-        "input": planner_input,
-        "output_schema": schema,
-    }, indent=2)
-
-    return [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_message},
-    ]
+    return system_prompt, planner_input
 
 
-async def call_planner(request: CreateIncidentRequest) -> PlannerOutput:
-    api_base, api_key, model = _ai_env()
-    chat_url = f"{api_base.rstrip('/')}/chat/completions"
-    messages = _build_planner_prompt(request)
+async def call_planner_with_fallback(
+    system_prompt: str,
+    planner_payload: dict[str, Any],
+) -> tuple[dict[str, Any], str]:
+    providers = configured_providers()
+    if not providers:
+        raise AIProviderError("No AI provider is configured")
 
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
-    body = {
-        "model": model,
-        "messages": messages,
-        "temperature": 0.1,
-        "max_tokens": 2000,
-    }
+    errors: list[str] = []
 
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        response = await client.post(chat_url, headers=headers, json=body)
-        response.raise_for_status()
-        data = response.json()
-        content = data["choices"][0]["message"]["content"]
+    for index, provider in enumerate(providers):
+        try:
+            plan, model = await call_openai_compatible(
+                base_url=provider["base_url"],
+                api_key=provider["api_key"],
+                model=provider["model"],
+                system_prompt=system_prompt,
+                user_payload=planner_payload,
+                timeout_seconds=12.0,
+            )
+            return plan, model
 
-    plan = json.loads(content)
-    validated = validate_plan(plan, request)
-    return validated
+        except AIProviderRateLimit:
+            errors.append(f"{provider['name']}: rate limited")
+            if index == len(providers) - 1:
+                await asyncio.sleep(0.4)
+                try:
+                    plan, model = await call_openai_compatible(
+                        base_url=provider["base_url"],
+                        api_key=provider["api_key"],
+                        model=provider["model"],
+                        system_prompt=system_prompt,
+                        user_payload=planner_payload,
+                        timeout_seconds=8.0,
+                    )
+                    return plan, model
+                except AIProviderError:
+                    pass
+
+        except AIProviderTimeout:
+            errors.append(f"{provider['name']}: timeout")
+
+        except PlannerResponseError:
+            errors.append(f"{provider['name']}: invalid response")
+
+        except AIProviderError:
+            errors.append(f"{provider['name']}: provider failure")
+
+    raise AIProviderError("All configured planning providers failed: " + "; ".join(errors))
+
+
+async def call_planner(request: CreateIncidentRequest) -> tuple[PlannerOutput, str]:
+    system_prompt, planner_payload = _build_planner_payload(request)
+    plan_dict, model_name = await call_planner_with_fallback(system_prompt, planner_payload)
+    validated = validate_plan(plan_dict, request)
+    return validated, model_name
 
 
 def validate_plan(plan: dict[str, Any], request: CreateIncidentRequest) -> PlannerOutput:

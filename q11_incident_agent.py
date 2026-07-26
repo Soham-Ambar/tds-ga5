@@ -7,7 +7,11 @@ from q11_models import (
     Outcome,
     ReceiptRequest,
 )
-from q11_planner import call_planner
+from q11_planner import (
+    AIProviderError,
+    PlannerOutputError,
+    call_planner,
+)
 from q11_state_machine import (
     build_initial_state,
     process_approval,
@@ -32,6 +36,17 @@ def startup() -> None:
     init_db()
 
 
+def _planning_failed_state(request_hash: str) -> dict:
+    return {
+        "stage": "planning_failed",
+        "requestHash": request_hash,
+        "currentResponse": {
+            "status": "failed",
+            "detail": "AI planning failed after exhausting all providers",
+        },
+    }
+
+
 @router.post("/v2/incidents")
 async def create_incident(
     body: CreateIncidentRequest,
@@ -48,7 +63,10 @@ async def create_incident(
 
     if existing:
         if existing["request_hash"] == request_hash:
-            return existing["state"]["currentResponse"]
+            state = existing["state"]
+            if state.get("stage") == "planning_failed":
+                raise HTTPException(status_code=503, detail="AI planning failed after exhausting all providers")
+            return state["currentResponse"]
         raise HTTPException(
             status_code=409,
             detail="runId already exists with different content",
@@ -66,13 +84,15 @@ async def create_incident(
         incoming_trace_id = new_trace_id()
         incoming_span_id = None
 
+    fail_state = _planning_failed_state(request_hash)
+    save_run(body.runId, request_hash, fail_state)
+
     try:
-        plan = await call_planner(body)
-    except Exception as e:
-        raise HTTPException(
-            status_code=503,
-            detail=f"AI provider error: {e}",
-        )
+        plan, model_name = await call_planner(body)
+    except AIProviderError:
+        raise HTTPException(status_code=503, detail="AI planning failed after exhausting all providers")
+    except PlannerOutputError:
+        raise HTTPException(status_code=503, detail="AI planning failed after exhausting all providers")
 
     state = build_initial_state(
         request=body,
@@ -81,6 +101,7 @@ async def create_incident(
         incoming_trace_id=incoming_trace_id,
         incoming_span_id=incoming_span_id,
         incoming_tracestate=tracestate,
+        model_name=model_name,
     )
 
     state["otlp"] = rebuild_otlp(state)
