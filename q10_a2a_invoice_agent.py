@@ -31,12 +31,13 @@ AI_API_KEY = os.environ.get("AI_API_KEY", "")
 AI_MODEL = os.environ.get("AI_MODEL", "")
 AI_TIMEOUT_SECONDS = int(os.environ.get("AI_TIMEOUT_SECONDS", "60") or "60")
 
-Q10_AI_BATCH_SIZE = int(os.environ.get("Q10_AI_BATCH_SIZE", "10") or "10")
-Q10_AI_MAX_INPUT_TOKENS = int(os.environ.get("Q10_AI_MAX_INPUT_TOKENS", "9000") or "9000")
+Q10_AI_BATCH_SIZE = int(os.environ.get("Q10_AI_BATCH_SIZE", "5") or "5")
+Q10_AI_MAX_INPUT_TOKENS = int(os.environ.get("Q10_AI_MAX_INPUT_TOKENS", "4000") or "4000")
 Q10_AI_CHARS_PER_TOKEN = int(os.environ.get("Q10_AI_CHARS_PER_TOKEN", "4") or "4")
 Q10_AI_MAX_OUTPUT_TOKENS_PER_PACKAGE = int(
-    os.environ.get("Q10_AI_MAX_OUTPUT_TOKENS_PER_PACKAGE", "450") or "450"
+    os.environ.get("Q10_AI_MAX_OUTPUT_TOKENS_PER_PACKAGE", "400") or "400"
 )
+Q10_AI_BATCH_DELAY = float(os.environ.get("Q10_AI_BATCH_DELAY", "5") or "5")
 _Q10_BATCH_ENV_LOG = False
 
 
@@ -824,15 +825,20 @@ async def _generate_proposals(
         if not _Q10_BATCH_ENV_LOG:
             _Q10_BATCH_ENV_LOG = True
             logger.info(
-                "batch_config batch_size=%d max_input_tokens=%d chars_per_token=%d max_output_per_package=%d",
+                "batch_config batch_size=%d max_input_tokens=%d chars_per_token=%d "
+                "max_output_per_package=%d batch_delay=%.1f",
                 Q10_AI_BATCH_SIZE, Q10_AI_MAX_INPUT_TOKENS,
                 Q10_AI_CHARS_PER_TOKEN, Q10_AI_MAX_OUTPUT_TOKENS_PER_PACKAGE,
+                Q10_AI_BATCH_DELAY,
             )
 
         batches = _build_batches(uncached, batch_id)
         logger.info("batch_split total=%d batches=%d", len(uncached), len(batches))
 
         for idx, batch_jobs in enumerate(batches):
+            if idx > 0 and Q10_AI_BATCH_DELAY > 0:
+                logger.info("batch_delay idx=%d seconds=%.1f", idx, Q10_AI_BATCH_DELAY)
+                await asyncio.sleep(Q10_AI_BATCH_DELAY)
             ai_proposals = await _call_ai_for_proposals(batch_jobs, batch_id, batch_index=idx)
 
             now = utc_now()
@@ -1195,7 +1201,8 @@ async def _call_ai_provider(messages: list[dict[str, str]], package_count: int =
         if response.status_code == 429:
             logger.warning("provider 429 hostname=%s attempt=%d", hostname, attempt)
             if attempt < 3:
-                await asyncio.sleep(2 ** attempt)
+                wait = 5 * (attempt + 1)
+                await asyncio.sleep(wait)
                 continue
             raise RuntimeError(f"AI provider rate limited after 4 attempts: {hostname}")
 
