@@ -228,8 +228,13 @@ def generate_task_id() -> str:
     ).hexdigest()[:32]
 
 
+_action_id_counter: int = 0
+
+
 def generate_action_id(package_id: str, batch_id: str) -> str:
-    raw = f"{batch_id}:{package_id}:{utc_now()}"
+    global _action_id_counter
+    _action_id_counter += 1
+    raw = f"{batch_id}:{package_id}:{utc_now()}:{_action_id_counter}"
     return "act-" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:28]
 
 
