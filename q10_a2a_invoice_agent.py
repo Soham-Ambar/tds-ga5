@@ -1206,11 +1206,10 @@ async def _call_ai_provider(messages: list[dict[str, str]], package_count: int =
         if response.status_code == 429:
             preview = response.text[:300]
             logger.warning("provider 429 hostname=%s attempt=%d body=%.200s", hostname, attempt, preview)
-            if attempt < 4:
-                wait = 20 * (attempt + 1)
-                await asyncio.sleep(wait)
+            if attempt == 0:
+                await asyncio.sleep(60)
                 continue
-            raise RuntimeError(f"AI provider rate limited after 5 attempts ({hostname}): {preview}")
+            raise RuntimeError(f"AI provider rate limited ({hostname}): {preview}")
 
         if response.status_code >= 400:
             preview = response.text[:300]
