@@ -395,13 +395,14 @@ async def message_send(request: Request):
             except RuntimeError as exc:
                 hostname = urlparse(AI_API_BASE).hostname or "unknown"
                 model = AI_MODEL or "unknown"
+                error_msg = str(exc)
                 logger.error(
-                    "ai_error hostname=%s model=%s error=%s",
-                    hostname, model, str(exc),
+                    "ai_error hostname=%s model=%s error=%.500s",
+                    hostname, model, error_msg,
                 )
                 raise HTTPException(
                     status_code=503,
-                    detail={"error": {"code": "AI_PROVIDER_ERROR", "message": "AI provider could not complete the request."}},
+                    detail={"error": {"code": "AI_PROVIDER_ERROR", "message": error_msg}},
                 ) from exc
 
 
