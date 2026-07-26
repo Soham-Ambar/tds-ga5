@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -29,6 +30,14 @@ A2A_BEARER_TOKEN = os.environ.get("A2A_BEARER_TOKEN", "ga5-invoice-token")
 AI_API_KEY = os.environ.get("AI_API_KEY", "")
 AI_MODEL = os.environ.get("AI_MODEL", "")
 AI_TIMEOUT_SECONDS = int(os.environ.get("AI_TIMEOUT_SECONDS", "60") or "60")
+
+Q10_AI_BATCH_SIZE = int(os.environ.get("Q10_AI_BATCH_SIZE", "10") or "10")
+Q10_AI_MAX_INPUT_TOKENS = int(os.environ.get("Q10_AI_MAX_INPUT_TOKENS", "9000") or "9000")
+Q10_AI_CHARS_PER_TOKEN = int(os.environ.get("Q10_AI_CHARS_PER_TOKEN", "4") or "4")
+Q10_AI_MAX_OUTPUT_TOKENS_PER_PACKAGE = int(
+    os.environ.get("Q10_AI_MAX_OUTPUT_TOKENS_PER_PACKAGE", "450") or "450"
+)
+_Q10_BATCH_ENV_LOG = False
 
 
 _DOTENV_CANDIDATES = [".env", "/etc/secrets/.env", "/etc/env"]
@@ -429,9 +438,13 @@ async def message_send(request: Request):
                 hostname = urlparse(ai_base).hostname or "unknown"
                 model = ai_model or "unknown"
                 error_msg = str(exc)
-                logger.error(
-                    "ai_error hostname=%s model=%s error=%.500s",
-                    hostname, model, error_msg,
+                exc_type = type(exc).__name__
+                batch_packages = data.get("packages", []) if isinstance(data, dict) else []
+                batch_size = len(batch_packages) if isinstance(batch_packages, list) else -1
+                logger.exception(
+                    "q10_503 type=%s hostname=%s model=%s taskId=unknown messageId=%s "
+                    "batch_size=%s elapsed=unknown error=%.500s",
+                    exc_type, hostname, model, message_id, batch_size, error_msg,
                 )
                 raise HTTPException(
                     status_code=503,
@@ -742,6 +755,47 @@ async def _handle_results_message(
     return {"task": task_obj}
 
 
+def _estimate_input_tokens(messages: list[dict[str, str]]) -> int:
+    chars = sum(len(m.get("role", "")) + len(m.get("content", "")) for m in messages)
+    return (chars + Q10_AI_CHARS_PER_TOKEN - 1) // Q10_AI_CHARS_PER_TOKEN
+
+
+def _build_output_tokens(package_count: int) -> int:
+    return min(8000, 500 + Q10_AI_MAX_OUTPUT_TOKENS_PER_PACKAGE * package_count)
+
+
+def _build_batches(
+    uncached: list[dict[str, Any]], batch_id: str
+) -> list[list[dict[str, Any]]]:
+    system_prompt = _build_system_prompt()
+    batches: list[list[dict[str, Any]]] = []
+    current: list[dict[str, Any]] = []
+
+    for job in uncached:
+        candidate = current + [job]
+        user_msg = json.dumps(
+            _build_user_message(candidate, batch_id), ensure_ascii=False
+        )
+        msgs = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_msg},
+        ]
+        estimated = _estimate_input_tokens(msgs)
+        output_budget = _build_output_tokens(len(candidate))
+        total = estimated + output_budget
+
+        if total > Q10_AI_MAX_INPUT_TOKENS and current:
+            batches.append(current)
+            current = [job]
+        else:
+            current = candidate
+
+    if current:
+        batches.append(current)
+
+    return batches
+
+
 async def _generate_proposals(
     packages: list[dict[str, Any]],
     batch_id: str,
@@ -766,42 +820,47 @@ async def _generate_proposals(
             uncached.append({"package": package, "packageId": package_id, "fingerprint": fp})
 
     if uncached:
-        ai_base, _, ai_model, _ = _ai_env()
-        hostname = urlparse(ai_base).hostname or "unknown"
-        model = ai_model or "unknown"
+        global _Q10_BATCH_ENV_LOG
+        if not _Q10_BATCH_ENV_LOG:
+            _Q10_BATCH_ENV_LOG = True
+            logger.info(
+                "batch_config batch_size=%d max_input_tokens=%d chars_per_token=%d max_output_per_package=%d",
+                Q10_AI_BATCH_SIZE, Q10_AI_MAX_INPUT_TOKENS,
+                Q10_AI_CHARS_PER_TOKEN, Q10_AI_MAX_OUTPUT_TOKENS_PER_PACKAGE,
+            )
 
-        ai_proposals = await _call_ai_for_proposals(uncached, batch_id)
+        batches = _build_batches(uncached, batch_id)
+        logger.info("batch_split total=%d batches=%d", len(uncached), len(batches))
 
-        now = utc_now()
-        for job, prop in zip(uncached, ai_proposals):
-            prop["packageId"] = job["packageId"]
-            if "actionId" not in prop or not prop["actionId"]:
-                prop["actionId"] = generate_action_id(job["packageId"], batch_id)
-            proposals.append(prop)
+        for idx, batch_jobs in enumerate(batches):
+            ai_proposals = await _call_ai_for_proposals(batch_jobs, batch_id, batch_index=idx)
 
-            with database_connection() as conn:
-                conn.execute(
-                    "INSERT OR REPLACE INTO a2a_invoice_cache (package_fingerprint, proposal_json, created_at) VALUES (?, ?, ?)",
-                    (job["fingerprint"], compact_json(prop), now),
-                )
+            now = utc_now()
+            for job, prop in zip(batch_jobs, ai_proposals):
+                prop["packageId"] = job["packageId"]
+                if "actionId" not in prop or not prop["actionId"]:
+                    prop["actionId"] = generate_action_id(job["packageId"], batch_id)
+                proposals.append(prop)
+
+                with database_connection() as conn:
+                    conn.execute(
+                        "INSERT OR REPLACE INTO a2a_invoice_cache (package_fingerprint, proposal_json, created_at) VALUES (?, ?, ?)",
+                        (job["fingerprint"], compact_json(prop), now),
+                    )
 
         elapsed = time_module.monotonic() - start_time
+        ai_base, _, ai_model, _ = _ai_env()
+        hostname = urlparse(ai_base).hostname or "unknown"
         logger.info(
-            "ai hostname=%s model=%s elapsed=%.2fs batch_size=%d",
-            hostname, model, elapsed, len(uncached),
+            "ai hostname=%s model=%s elapsed=%.2fs total_packages=%d batches=%d",
+            hostname, ai_model or "unknown", elapsed, len(uncached), len(batches),
         )
 
     return proposals
 
 
-async def _call_ai_for_proposals(
-    jobs: list[dict[str, Any]],
-    batch_id: str,
-) -> list[dict[str, Any]]:
-    packages = [job["package"] for job in jobs]
-    action_list = sorted(ALLOWED_ACTIONS)
-
-    system_prompt = (
+def _build_system_prompt() -> str:
+    return (
         "You are an invoice action decision engine. "
         "Analyze each invoice package and choose exactly one action.\n\n"
         "Actions:\n"
@@ -824,30 +883,125 @@ async def _call_ai_for_proposals(
         "Do not include markdown fences, explanations, or extra text."
     )
 
-    user_message = {
+
+def _build_user_message(jobs: list[dict[str, Any]], batch_id: str) -> dict[str, Any]:
+    return {
         "profile": "ga5-a2a-invoice-agent/v1",
         "batchId": batch_id,
-        "allowedActions": action_list,
-        "packages": packages,
+        "allowedActions": sorted(ALLOWED_ACTIONS),
+        "packages": [job["package"] for job in jobs],
     }
 
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": json.dumps(user_message, ensure_ascii=False)},
-    ]
+
+async def _call_ai_for_proposals(
+    jobs: list[dict[str, Any]],
+    batch_id: str,
+    batch_index: int = 0,
+) -> list[dict[str, Any]]:
+    system_prompt = _build_system_prompt()
 
     use_fake = os.environ.get("Q10_FAKE_AI", "").strip() == "1"
     if use_fake:
         raw_proposals = _fake_ai_proposals(jobs, batch_id)
-    else:
-        ai_base, ai_key, ai_model, ai_timeout = _ai_env()
-        if not ai_base:
-            raise RuntimeError("AI_API_BASE is not configured.")
-        if not ai_model:
-            raise RuntimeError("AI_MODEL is not configured.")
-        text = await _call_ai_provider(messages)
-        raw_proposals = _parse_ai_response(text, len(jobs))
+        return _validate_proposals(raw_proposals, jobs, batch_id)
 
+    ai_base, ai_key, ai_model, ai_timeout = _ai_env()
+    if not ai_base:
+        raise RuntimeError("AI_API_BASE is not configured.")
+    if not ai_model:
+        raise RuntimeError("AI_MODEL is not configured.")
+
+    hostname = urlparse(ai_base).hostname or "unknown"
+
+    return await _call_ai_with_split(jobs, batch_id, batch_index, system_prompt, hostname, ai_model)
+
+
+async def _call_ai_with_split(
+    jobs: list[dict[str, Any]],
+    batch_id: str,
+    batch_index: int,
+    system_prompt: str,
+    hostname: str,
+    model: str,
+) -> list[dict[str, Any]]:
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": json.dumps(_build_user_message(jobs, batch_id), ensure_ascii=False)},
+    ]
+
+    estimated_input = _estimate_input_tokens(messages)
+    output_budget = _build_output_tokens(len(jobs))
+
+    logger.info(
+        "ai_batch index=%d packages=%d estimated_input_tokens=%d max_output_tokens=%d model=%s hostname=%s",
+        batch_index, len(jobs), estimated_input, output_budget, model, hostname,
+    )
+
+    try:
+        text = await _call_ai_provider(messages, len(jobs))
+        raw_proposals = _parse_ai_response(text, len(jobs))
+        return _validate_proposals(raw_proposals, jobs, batch_id)
+    except RuntimeError as exc:
+        error_msg = str(exc)
+        is_413 = "413" in error_msg or "Request too large" in error_msg or "payload too large" in error_msg.lower()
+
+        if is_413 and len(jobs) > 1:
+            mid = len(jobs) // 2
+            left, right = jobs[:mid], jobs[mid:]
+            logger.warning(
+                "ai_batch_split status=413 index=%d original=%d left=%d right=%d",
+                batch_index, len(jobs), len(left), len(right),
+            )
+            left_result = await _call_ai_with_split(left, batch_id, batch_index, system_prompt, hostname, model)
+            right_result = await _call_ai_with_split(right, batch_id, batch_index, system_prompt, hostname, model)
+            return left_result + right_result
+
+        if is_413 and len(jobs) == 1:
+            compact = _build_compact_messages(jobs[0], batch_id)
+            try:
+                text = await _call_ai_provider(compact, 1)
+                raw_proposals = _parse_ai_response(text, 1)
+                return _validate_proposals(raw_proposals, jobs, batch_id)
+            except RuntimeError as compact_exc:
+                logger.error("compact_ai_failed packageId=%s error=%.200s", jobs[0]["packageId"], str(compact_exc))
+
+        raise
+
+
+def _build_compact_messages(job: dict[str, Any], batch_id: str) -> list[dict[str, str]]:
+    package = job["package"]
+    compact_package = {
+        "packageId": job["packageId"],
+        "vendorName": package.get("vendorName", ""),
+        "invoiceNumber": package.get("invoiceNumber", ""),
+        "amountMinor": package.get("amountMinor", 0),
+        "currency": package.get("currency", "INR"),
+        "documents": package.get("documents", []),
+    }
+    system_prompt = (
+        "Analyze one invoice package. Choose exactly one action: "
+        "settle_invoice, request_approval, hold_invoice, reject_duplicate, open_exception. "
+        "Return ONLY valid JSON: {\"proposals\":[{\"packageId\":\"...\",\"actionId\":\"...\",\"action\":\"...\","
+        "\"facts\":{\"vendorName\":\"...\",\"invoiceNumber\":\"...\",\"amountMinor\":0,\"currency\":\"INR\"},"
+        "\"evidenceRefs\":[\"...\"],\"rationale\":\"...\"}]}"
+    )
+    user = {
+        "profile": "ga5-a2a-invoice-agent/v1",
+        "batchId": batch_id,
+        "allowedActions": sorted(ALLOWED_ACTIONS),
+        "packages": [compact_package],
+    }
+    return [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": json.dumps(user, ensure_ascii=False)},
+    ]
+
+
+def _validate_proposals(
+    raw_proposals: list[dict[str, Any]],
+    jobs: list[dict[str, Any]],
+    batch_id: str,
+) -> list[dict[str, Any]]:
     validated: list[dict[str, Any]] = []
     seen_package_ids: set[str] = set()
     seen_action_ids: set[str] = set()
@@ -857,7 +1011,10 @@ async def _call_ai_for_proposals(
             raise RuntimeError(f"Proposal {i} is not an object.")
         package_id = prop.get("packageId", "")
         if not package_id or package_id not in {j["packageId"] for j in jobs}:
-            package_id = jobs[i]["packageId"]
+            if i < len(jobs):
+                package_id = jobs[i]["packageId"]
+            else:
+                raise RuntimeError(f"Proposal {i} has no valid packageId.")
             prop["packageId"] = package_id
         if package_id in seen_package_ids:
             raise RuntimeError(f"Duplicate packageId in AI output: {package_id}")
@@ -928,6 +1085,23 @@ def _fake_ai_proposals(jobs: list[dict[str, Any]], batch_id: str) -> list[dict[s
     return proposals
 
 
+def _repair_json(text: str) -> str | None:
+    """Attempt to repair malformed JSON once. Returns repaired text or None."""
+    try:
+        json.loads(text)
+        return text
+    except json.JSONDecodeError:
+        pass
+    for closing in ("}", "]\n}", "]\n\n}"):
+        candidate = text.rstrip() + closing
+        try:
+            json.loads(candidate)
+            return candidate
+        except json.JSONDecodeError:
+            pass
+    return None
+
+
 def _parse_ai_response(text: str, expected_count: int) -> list[dict[str, Any]]:
     cleaned = text.strip()
     if cleaned.startswith("```"):
@@ -937,6 +1111,10 @@ def _parse_ai_response(text: str, expected_count: int) -> list[dict[str, Any]]:
         if lines and lines[-1].strip() == "```":
             lines = lines[:-1]
         cleaned = "\n".join(lines).strip()
+
+    repaired = _repair_json(cleaned)
+    if repaired is not None:
+        cleaned = repaired
 
     start = cleaned.find("{")
     end = cleaned.rfind("}")
@@ -963,7 +1141,7 @@ def _parse_ai_response(text: str, expected_count: int) -> list[dict[str, Any]]:
     return proposals
 
 
-async def _call_ai_provider(messages: list[dict[str, str]]) -> str:
+async def _call_ai_provider(messages: list[dict[str, str]], package_count: int = 1) -> str:
     global _ai_diagnostic_done
     api_base, api_key, model, ai_timeout = _ai_env()
     if not api_base:
@@ -986,52 +1164,71 @@ async def _call_ai_provider(messages: list[dict[str, str]]) -> str:
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
 
+    max_output_tokens = _build_output_tokens(package_count)
+
     body = {
         "model": model,
         "messages": messages,
         "temperature": 0,
-        "max_tokens": 4000,
+        "max_tokens": max_output_tokens,
     }
 
     timeout = httpx.Timeout(connect=10, read=ai_timeout, write=20, pool=10)
 
-    try:
-        async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
-            response = await client.post(chat_url, headers=headers, json=body)
-    except httpx.TimeoutException as e:
-        logger.error("provider hostname=%s model=%s error=timeout", hostname, model)
-        raise RuntimeError(f"AI provider timed out: {hostname}") from e
-    except httpx.ConnectError as e:
-        logger.error("provider hostname=%s model=%s error=connect", hostname, model)
-        raise RuntimeError(f"AI provider connection failed: {hostname}") from e
-    except httpx.HTTPError as e:
-        logger.error("provider hostname=%s model=%s error=%s", hostname, model, type(e).__name__)
-        raise RuntimeError(f"AI provider HTTP error: {hostname}") from e
+    for attempt in range(4):
+        try:
+            async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
+                response = await client.post(chat_url, headers=headers, json=body)
+        except httpx.TimeoutException as e:
+            logger.warning("provider timeout hostname=%s attempt=%d", hostname, attempt)
+            if attempt < 3:
+                await asyncio.sleep(2 ** attempt)
+                continue
+            raise RuntimeError(f"AI provider timed out after 4 attempts: {hostname}") from e
+        except httpx.ConnectError as e:
+            logger.error("provider connect hostname=%s", hostname)
+            raise RuntimeError(f"AI provider connection failed: {hostname}") from e
+        except httpx.HTTPError as e:
+            logger.error("provider http hostname=%s type=%s", hostname, type(e).__name__)
+            raise RuntimeError(f"AI provider HTTP error: {hostname}") from e
 
-    if response.status_code >= 400:
-        preview = response.text[:300]
-        logger.error(
-            "provider hostname=%s model=%s status=%s",
-            hostname, model, response.status_code,
-        )
-        raise RuntimeError(
-            f"AI provider returned HTTP {response.status_code}: {preview}"
-        )
+        if response.status_code == 429:
+            logger.warning("provider 429 hostname=%s attempt=%d", hostname, attempt)
+            if attempt < 3:
+                await asyncio.sleep(2 ** attempt)
+                continue
+            raise RuntimeError(f"AI provider rate limited after 4 attempts: {hostname}")
 
-    try:
-        data = response.json()
-    except json.JSONDecodeError as e:
-        raise RuntimeError("AI provider returned non-JSON response.") from e
+        if response.status_code >= 400:
+            preview = response.text[:300]
+            logger.error(
+                "provider status=%s hostname=%s model=%s attempt=%d packages=%d",
+                response.status_code, hostname, model, attempt, package_count,
+            )
+            raise RuntimeError(
+                f"AI provider returned HTTP {response.status_code}: {preview}"
+            )
 
-    try:
-        content = data["choices"][0]["message"]["content"]
-    except (KeyError, IndexError, TypeError) as e:
-        raise RuntimeError("AI provider returned unexpected response structure.") from e
+        try:
+            data = response.json()
+        except json.JSONDecodeError as e:
+            logger.warning("provider bad_json hostname=%s attempt=%d", hostname, attempt)
+            if attempt < 3:
+                await asyncio.sleep(2 ** attempt)
+                continue
+            raise RuntimeError("AI provider returned non-JSON response after retries.") from e
 
-    if not isinstance(content, str):
-        raise RuntimeError("AI provider returned non-string content.")
+        try:
+            content = data["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError) as e:
+            raise RuntimeError("AI provider returned unexpected response structure.") from e
 
-    return content
+        if not isinstance(content, str):
+            raise RuntimeError("AI provider returned non-string content.")
+
+        return content
+
+    raise RuntimeError("AI provider failed after 4 attempts (unreachable)")
 
 
 @router.get("/a2a/tasks")
