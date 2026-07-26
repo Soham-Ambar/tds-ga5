@@ -31,25 +31,29 @@ AI_MODEL = os.environ.get("AI_MODEL", "")
 AI_TIMEOUT_SECONDS = int(os.environ.get("AI_TIMEOUT_SECONDS", "60") or "60")
 
 
+_DOTENV_CANDIDATES = [".env", "/etc/secrets/.env", "/etc/env"]
+
+
 def _find_env(*names: str, default: str = "") -> str:
     for n in names:
         v = os.environ.get(n, "")
         if v:
             return v
-    p = Path(".env")
-    if p.is_file():
-        try:
-            for line in p.read_text("utf-8").splitlines():
-                line = line.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                k, _, v = line.partition("=")
-                k = k.strip()
-                v = v.strip().strip("\"'")
-                if k in names and v:
-                    return v
-        except OSError:
-            pass
+    for dotenv in _DOTENV_CANDIDATES:
+        p = Path(dotenv)
+        if p.is_file():
+            try:
+                for line in p.read_text("utf-8").splitlines():
+                    line = line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    k, _, v = line.partition("=")
+                    k = k.strip()
+                    v = v.strip().strip("\"'")
+                    if k in names and v:
+                        return v
+            except OSError:
+                pass
     return default
 
 
