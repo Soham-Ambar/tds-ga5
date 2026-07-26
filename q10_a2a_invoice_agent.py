@@ -31,13 +31,13 @@ AI_API_KEY = os.environ.get("AI_API_KEY", "")
 AI_MODEL = os.environ.get("AI_MODEL", "")
 AI_TIMEOUT_SECONDS = int(os.environ.get("AI_TIMEOUT_SECONDS", "60") or "60")
 
-Q10_AI_BATCH_SIZE = int(os.environ.get("Q10_AI_BATCH_SIZE", "3") or "3")
-Q10_AI_MAX_INPUT_TOKENS = int(os.environ.get("Q10_AI_MAX_INPUT_TOKENS", "2500") or "2500")
+Q10_AI_BATCH_SIZE = int(os.environ.get("Q10_AI_BATCH_SIZE", "2") or "2")
+Q10_AI_MAX_INPUT_TOKENS = int(os.environ.get("Q10_AI_MAX_INPUT_TOKENS", "2000") or "2000")
 Q10_AI_CHARS_PER_TOKEN = int(os.environ.get("Q10_AI_CHARS_PER_TOKEN", "4") or "4")
 Q10_AI_MAX_OUTPUT_TOKENS_PER_PACKAGE = int(
     os.environ.get("Q10_AI_MAX_OUTPUT_TOKENS_PER_PACKAGE", "400") or "400"
 )
-Q10_AI_BATCH_DELAY = float(os.environ.get("Q10_AI_BATCH_DELAY", "5") or "5")
+Q10_AI_BATCH_DELAY = float(os.environ.get("Q10_AI_BATCH_DELAY", "20") or "20")
 _Q10_BATCH_ENV_LOG = False
 
 
@@ -840,25 +840,11 @@ async def _generate_proposals(
         batches = _build_batches(uncached, batch_id)
         logger.info("batch_split total=%d batches=%d", len(uncached), len(batches))
 
-        _tokens_since_last_reset = 0
-        _last_reset = time_module.monotonic()
-
         for idx, batch_jobs in enumerate(batches):
-            if idx > 0:
-                _elapsed = time_module.monotonic() - _last_reset
-                _rate = _tokens_since_last_reset / max(_elapsed, 1)
-                _target_delay = max(Q10_AI_BATCH_DELAY, (_tokens_since_last_reset / 12000) * 60 - _elapsed)
-                if _target_delay > 0 and _rate > 200:
-                    logger.info("batch_delay idx=%d seconds=%.1f rate=%.0f tok/s", idx, _target_delay, _rate)
-                    await asyncio.sleep(_target_delay)
-                if _elapsed > 60:
-                    _tokens_since_last_reset = 0
-                    _last_reset = time_module.monotonic()
+            if idx > 0 and Q10_AI_BATCH_DELAY > 0:
+                logger.info("batch_delay idx=%d seconds=%.1f", idx, Q10_AI_BATCH_DELAY)
+                await asyncio.sleep(Q10_AI_BATCH_DELAY)
             ai_proposals = await _call_ai_for_proposals(batch_jobs, batch_id, batch_index=idx)
-            _tokens_since_last_reset += _estimate_input_tokens([
-                {"role": "system", "content": _build_system_prompt()},
-                {"role": "user", "content": json.dumps(_build_user_message(batch_jobs, batch_id), ensure_ascii=False)},
-            ]) + _build_output_tokens(len(batch_jobs))
 
             now = utc_now()
             for job, prop in zip(batch_jobs, ai_proposals):
