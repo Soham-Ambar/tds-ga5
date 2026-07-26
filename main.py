@@ -14,6 +14,7 @@ from q10_a2a_invoice_agent import (
     router as q10_router,
     install_q10_exception_handlers,
 )
+from q11_incident_agent import router as q11_router
 
 
 app = FastAPI(
@@ -39,6 +40,7 @@ app.include_router(redteam_guardrail_router)
 app.include_router(mailroom_router)
 app.include_router(q10_router)
 install_q10_exception_handlers(app)
+app.include_router(q11_router)
 
 
 @app.get("/")
@@ -53,6 +55,9 @@ def root():
             "POST /mcp",
             "POST /redteam-guardrail",
             "POST /mailroom-agent",
+            "POST /v2/incidents",
+            "POST /v2/incidents/{runId}/receipts",
+            "GET /v2/incidents/{runId}",
         ],
     }
 
