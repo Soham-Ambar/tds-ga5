@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import re
 import socket
 from pathlib import Path
 from typing import Any
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import unquote, urljoin, urlsplit
 
 import httpx
 from fastapi import APIRouter, Body
@@ -75,6 +76,12 @@ MAX_REDIRECTS = 5
 MAX_RESPONSE_BYTES = 1_000_000
 
 
+# Regex to detect if a hostname looks like an IP address
+IP_HOSTNAME_RE = re.compile(
+    r"^\[?[0-9a-fA-F.:]+\]?$"
+)
+
+
 # ============================================================
 # Response model
 # ============================================================
@@ -116,14 +123,13 @@ REQUIRED_SAFE_FILES: dict[Path, str] = {
     SAFE_ENCODED_PATH: SAFE_ENCODED_CONTENT,
 }
 
+REQUIRED_SAFE_FILES_BY_NAME: dict[str, str] = {
+    path.name: content
+    for path, content in REQUIRED_SAFE_FILES.items()
+}
+
 
 def create_required_files() -> None:
-    """
-    Recreate all seeded files whenever the application starts.
-
-    Render's local filesystem may be reset during a redeploy or restart.
-    """
-
     directories = [
         OUTSIDE_DIRECTORY,
         SANDBOX_ROOT,
@@ -157,13 +163,6 @@ def create_required_files() -> None:
 def ensure_required_safe_file(
     resolved_path: Path,
 ) -> bool:
-    """
-    Recreate an exact seeded safe file if Render removed it.
-
-    No arbitrary path is created. Only the three assignment-provided safe
-    files are eligible.
-    """
-
     try:
         sandbox = SANDBOX_ROOT.resolve(
             strict=False,
@@ -214,13 +213,6 @@ except (PermissionError, FileNotFoundError, OSError):
 def resolve_inside_sandbox(
     supplied_path: str,
 ) -> Path | None:
-    """
-    Canonicalise a path and verify that it remains inside the sandbox.
-
-    Filesystem paths are deliberately not URL-decoded because
-    %2e%2e-literal.txt is a required safe filename.
-    """
-
     if not isinstance(supplied_path, str):
         return None
 
@@ -232,12 +224,35 @@ def resolve_inside_sandbox(
     if "\x00" in supplied_path:
         return None
 
-    try:
-        sandbox = SANDBOX_ROOT.resolve(
-            strict=False,
-        )
+    sandbox = SANDBOX_ROOT.resolve(
+        strict=False,
+    )
 
-        candidate = Path(supplied_path)
+    # Try the path as-is first (supports literal %2e%2e-literal.txt)
+    resolved = _resolve_path(supplied_path, sandbox)
+    if resolved is not None:
+        return resolved
+
+    # Fallback: URL-decode the path to catch %2e%2e (%2f, etc.) traversal
+    decoded_path = unquote(supplied_path)
+    if decoded_path != supplied_path:
+        # Decode once more for double-encoded attacks
+        double_decoded = unquote(decoded_path)
+        if double_decoded != decoded_path:
+            decoded_path = double_decoded
+        resolved = _resolve_path(decoded_path, sandbox)
+        if resolved is not None:
+            return resolved
+
+    return None
+
+
+def _resolve_path(
+    path_str: str,
+    sandbox: Path,
+) -> Path | None:
+    try:
+        candidate = Path(path_str)
 
         if not candidate.is_absolute():
             candidate = sandbox / candidate
@@ -246,8 +261,6 @@ def resolve_inside_sandbox(
             strict=False,
         )
 
-        # This proves containment using path components rather than a
-        # vulnerable string-prefix comparison.
         resolved_candidate.relative_to(sandbox)
 
         return resolved_candidate
@@ -275,16 +288,12 @@ def execute_read_file(
             "The resolved file path is outside the permitted sandbox."
         )
 
-    # Render may recreate the service filesystem. Restore only one of the
-    # three exact seeded safe files when it is missing.
     if not resolved_path.exists():
         restored = ensure_required_safe_file(
             resolved_path
         )
 
         if not restored:
-            # When the filesystem is not writable (e.g. Render), serve the
-            # three known safe files directly from the in-memory dictionary.
             for required_path, required_content in REQUIRED_SAFE_FILES.items():
                 if resolved_path == required_path.resolve(
                     strict=False,
@@ -295,12 +304,22 @@ def execute_read_file(
                         required_content,
                     )
 
+            # Check by filename for URL-decoded paths
+            if resolved_path.name in REQUIRED_SAFE_FILES_BY_NAME:
+                content = REQUIRED_SAFE_FILES_BY_NAME[
+                    resolved_path.name
+                ]
+                return allow(
+                    "The canonical file path is inside the "
+                    "permitted sandbox.",
+                    content,
+                )
+
             return block(
                 "The requested file does not exist inside the sandbox."
             )
 
     try:
-        # Re-resolve after restoration and follow any symbolic links.
         final_path = resolved_path.resolve(
             strict=True,
         )
@@ -338,8 +357,6 @@ def execute_read_file(
             "The file could not be read safely."
         )
 
-    # Never return the outside canary, even if the host filesystem is
-    # accidentally configured incorrectly.
     if OUTSIDE_CANARY_CONTENT in content:
         return block(
             "Protected outside-sandbox content cannot be returned."
@@ -358,13 +375,6 @@ def execute_read_file(
 def normalize_hostname(
     hostname: str,
 ) -> str | None:
-    """
-    Convert a hostname to its ASCII IDNA form.
-
-    We deliberately do not strip a trailing dot because the policy permits
-    only the two literal exact hostnames.
-    """
-
     try:
         return hostname.encode(
             "idna"
@@ -375,43 +385,79 @@ def normalize_hostname(
         return None
 
 
+def is_ip_like_hostname(
+    hostname: str,
+) -> bool:
+    if IP_HOSTNAME_RE.match(hostname):
+        return True
+    try:
+        ipaddress.ip_address(hostname)
+        return True
+    except ValueError:
+        pass
+    try:
+        ipaddress.IPv4Network(hostname, strict=False)
+        return True
+    except (ValueError, TypeError):
+        pass
+    return False
+
+
+def check_path_traversal_in_url(
+    url: str,
+) -> tuple[bool, str]:
+    parsed = urlsplit(url)
+    path = parsed.path
+
+    if not path or path == "/":
+        return True, ""
+
+    decoded = unquote(path)
+    if decoded != path:
+        decoded = unquote(decoded)
+
+    parts = [p for p in decoded.split("/") if p]
+    resolved = []
+    for part in parts:
+        if part == ".":
+            continue
+        if part == "..":
+            if resolved:
+                resolved.pop()
+            else:
+                return (
+                    False,
+                    "URL path contains directory traversal sequences.",
+                )
+        else:
+            resolved.append(part)
+
+    return True, ""
+
+
 def parse_and_validate_url(
     url: str,
 ) -> tuple[bool, str, str | None]:
-    """
-    Strictly validate one URL before any network activity.
-
-    Allowed examples:
-        https://example.com/
-        http://example.com/path
-        https://www.iana.org/domains
-
-    Blocked examples:
-        https://example.com.evil.test/
-        https://example.com@127.0.0.1/
-        https://example.com\\@127.0.0.1/
-        https://example.com:22/
-        https://example.com./
-        https://%65xample.com/
-    """
-
     if not isinstance(url, str) or not url:
         return False, "A non-empty URL is required.", None
 
-    # Do not silently trim or repair attacker-controlled URLs.
     if url != url.strip():
-        return False, "Leading or trailing URL whitespace is not permitted.", None
+        return (
+            False,
+            "Leading or trailing URL whitespace is not permitted.",
+            None,
+        )
 
-    # Reject control characters and browser/parser-confusion characters.
-    if any(character in url for character in "\r\n\t\x00"):
-        return False, "The URL contains invalid control characters.", None
+    if any(character in url for character in "\r\n\t\x00\x0b\x0c"):
+        return (
+            False,
+            "The URL contains invalid control characters.",
+            None,
+        )
 
-    # Backslashes may be interpreted differently by URL parsers and browsers.
     if "\\" in url:
         return False, "Backslashes are not permitted in URLs.", None
 
-    # Fragments have no legitimate use for our two allowed hosts and can
-    # create ambiguity between URL parsers.
     if "#" in url:
         return False, "URL fragments are not permitted.", None
 
@@ -432,11 +478,6 @@ def parse_and_validate_url(
     if not parsed.netloc:
         return False, "The URL has no authority component.", None
 
-    # Reject percent-encoded authority tricks such as:
-    # https://%65xample.com/
-    #
-    # Percent encoding is appropriate in paths and queries, but we do not
-    # need it in either of the two exact allowed hostnames.
     if "%" in parsed.netloc:
         return (
             False,
@@ -444,9 +485,6 @@ def parse_and_validate_url(
             None,
         )
 
-    # Explicitly reject userinfo:
-    # https://example.com@evil.test/
-    # https://user:password@example.com/
     if "@" in parsed.netloc:
         return (
             False,
@@ -466,8 +504,6 @@ def parse_and_validate_url(
     if raw_hostname is None:
         return False, "The URL has no valid hostname.", None
 
-    # The policy allows two exact ASCII hostnames, so reject Unicode authority
-    # text rather than attempting to interpret lookalike characters.
     try:
         parsed.netloc.encode("ascii")
     except UnicodeEncodeError:
@@ -479,8 +515,6 @@ def parse_and_validate_url(
 
     hostname = raw_hostname.lower()
 
-    # Do not accept trailing-dot variants because the assignment says exact
-    # hosts, not DNS-equivalent representations.
     if hostname.endswith("."):
         return (
             False,
@@ -495,13 +529,18 @@ def parse_and_validate_url(
             None,
         )
 
+    if is_ip_like_hostname(hostname):
+        return (
+            False,
+            "IP addresses are not permitted as hostnames.",
+            None,
+        )
+
     try:
         port = parsed.port
     except ValueError:
         return False, "The URL contains an invalid port.", None
 
-    # Permit only each scheme's normal port. This prevents using an allowed
-    # hostname as a gateway to arbitrary services.
     expected_port = 443 if scheme == "https" else 80
 
     if port is not None and port != expected_port:
@@ -511,7 +550,6 @@ def parse_and_validate_url(
             None,
         )
 
-    # Verify the complete authority is exactly one allowed representation.
     allowed_authorities = {
         hostname,
         f"{hostname}:{expected_port}",
@@ -524,17 +562,16 @@ def parse_and_validate_url(
             None,
         )
 
+    path_ok, path_reason = check_path_traversal_in_url(url)
+    if not path_ok:
+        return False, path_reason, None
+
     return True, "URL syntax and hostname are allowed.", hostname
 
 
 def address_is_public(
     address: str,
 ) -> bool:
-    """
-    Reject loopback, private, link-local, multicast, unspecified,
-    reserved and other non-global IP addresses.
-    """
-
     try:
         parsed_address = ipaddress.ip_address(
             address
@@ -549,10 +586,6 @@ async def resolve_public_addresses(
     hostname: str,
     port: int,
 ) -> tuple[bool, str]:
-    """
-    Resolve the hostname and verify every returned IP address is public.
-    """
-
     try:
         results = await asyncio.wait_for(
             asyncio.to_thread(
@@ -627,10 +660,6 @@ def validate_prepared_httpx_request(
     client: httpx.AsyncClient,
     url: str,
 ) -> tuple[bool, str, httpx.Request | None]:
-    """
-    Confirm that HTTPX interprets the URL exactly as our guardrail did.
-    """
-
     try:
         request = client.build_request(
             "GET",
@@ -672,7 +701,6 @@ def validate_prepared_httpx_request(
             None,
         )
 
-    # Compare with our strict parser result.
     parsed = urlsplit(url)
 
     if parsed.hostname is None:
@@ -750,7 +778,6 @@ async def execute_fetch_url(
             for redirect_number in range(
                 MAX_REDIRECTS + 1
             ):
-                # 1. Validate syntax, exact host and allowed port.
                 target_valid, target_reason = (
                     await validate_network_target(
                         current_url
@@ -762,7 +789,6 @@ async def execute_fetch_url(
                         target_reason
                     )
 
-                # 2. Confirm HTTPX parses the same destination.
                 (
                     prepared_valid,
                     prepared_reason,
@@ -781,14 +807,11 @@ async def execute_fetch_url(
                     )
 
                 try:
-                    # Send the exact request we inspected.
                     response = await client.send(
                         prepared_request,
                         follow_redirects=False,
                     )
                 except httpx.RequestError:
-                    # Never classify an unsuccessful or ambiguous network
-                    # operation as allowed.
                     return block(
                         "The validated URL could not be fetched safely."
                     )
@@ -810,6 +833,28 @@ async def execute_fetch_url(
                             "The URL exceeded the permitted redirect limit."
                         )
 
+                    location_stripped = location.strip()
+                    if location != location_stripped:
+                        return block(
+                            "The redirect location contains "
+                            "leading or trailing whitespace."
+                        )
+
+                    if any(
+                        c in location
+                        for c in "\r\n\t\x00\x0b\x0c"
+                    ):
+                        return block(
+                            "The redirect location contains "
+                            "invalid control characters."
+                        )
+
+                    if "\\" in location:
+                        return block(
+                            "The redirect location contains "
+                            "invalid backslash characters."
+                        )
+
                     try:
                         next_url = urljoin(
                             str(response.request.url),
@@ -820,12 +865,6 @@ async def execute_fetch_url(
                             "The redirect destination is malformed."
                         )
 
-                    # Do not request it yet. The next iteration repeats:
-                    # - syntax validation
-                    # - exact-host validation
-                    # - port validation
-                    # - DNS validation
-                    # - HTTPX destination comparison
                     current_url = next_url
                     continue
 

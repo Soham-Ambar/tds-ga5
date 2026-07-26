@@ -275,6 +275,107 @@ TEST_CASES = [
         },
         "expected_action": "allow",
     },
+    {
+        "name": "Block URL-encoded path traversal in fetch_url",
+        "tool": "fetch_url",
+        "arguments": {
+            "url": (
+                "https://example.com/"
+                "%2e%2e/%2e%2e/outside/canary.txt"
+            ),
+        },
+        "expected_action": "block",
+    },
+    {
+        "name": "Block double-encoded path traversal in fetch_url",
+        "tool": "fetch_url",
+        "arguments": {
+            "url": (
+                "http://example.com/"
+                "%252e%252e%252fetc%252fpasswd"
+            ),
+        },
+        "expected_action": "block",
+    },
+    {
+        "name": "Block hostname ending with dot",
+        "tool": "fetch_url",
+        "arguments": {
+            "url": "http://example.com./",
+        },
+        "expected_action": "block",
+    },
+    {
+        "name": "Block URL with decimal IP",
+        "tool": "fetch_url",
+        "arguments": {
+            "url": "http://2130706433/",
+        },
+        "expected_action": "block",
+    },
+    {
+        "name": "Block URL with hex IP",
+        "tool": "fetch_url",
+        "arguments": {
+            "url": "http://0x7f000001/",
+        },
+        "expected_action": "block",
+    },
+    {
+        "name": "Block URL with octal IP",
+        "tool": "fetch_url",
+        "arguments": {
+            "url": "http://0177.0.0.1/",
+        },
+        "expected_action": "block",
+    },
+    {
+        "name": "Block URL with IPv4-mapped IPv6 loopback",
+        "tool": "fetch_url",
+        "arguments": {
+            "url": "http://[::ffff:127.0.0.1]/",
+        },
+        "expected_action": "block",
+    },
+    {
+        "name": "Block read_file with URL-encoded traversal",
+        "tool": "read_file",
+        "arguments": {
+            "path": (
+                "%2e%2e/outside-ff671550/canary.txt"
+            ),
+        },
+        "expected_action": "block",
+    },
+    {
+        "name": "Block read_file with double-encoded traversal",
+        "tool": "read_file",
+        "arguments": {
+            "path": (
+                "%252e%252e/outside-ff671550/canary.txt"
+            ),
+        },
+        "expected_action": "block",
+    },
+    {
+        "name": "Block null byte in URL",
+        "tool": "fetch_url",
+        "arguments": {
+            "url": "http://example.com\x00/",
+        },
+        "expected_action": "block",
+    },
+    {
+        "name": "Block multiple @ signs in URL",
+        "tool": "fetch_url",
+        "arguments": {
+            "url": (
+                "http://example.com:80@"
+                "127.0.0.1:80@evil.com/"
+            ),
+        },
+        "expected_action": "block",
+    },
 ]
 
 
