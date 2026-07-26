@@ -43,6 +43,7 @@ install_q10_exception_handlers(app)
 
 @app.get("/")
 def root():
+    import os as _os
     return {
         "message": "TDS GA5 API is running",
         "endpoints": [
@@ -54,6 +55,9 @@ def root():
             "POST /redteam-guardrail",
             "POST /mailroom-agent",
         ],
+        "PORT": _os.environ.get("PORT", "(unset)"),
+        "AI_API_BASE": "yes" if _os.environ.get("AI_API_BASE", "") else "no",
+        "HOSTNAME": _os.environ.get("HOSTNAME", "(unset)"),
     }
 
 
