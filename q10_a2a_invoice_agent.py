@@ -1186,7 +1186,7 @@ async def _call_ai_provider(messages: list[dict[str, str]], package_count: int =
 
     timeout = httpx.Timeout(connect=10, read=ai_timeout, write=20, pool=10)
 
-    for attempt in range(4):
+    for attempt in range(5):
         try:
             async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
                 response = await client.post(chat_url, headers=headers, json=body)
@@ -1206,10 +1206,11 @@ async def _call_ai_provider(messages: list[dict[str, str]], package_count: int =
         if response.status_code == 429:
             preview = response.text[:300]
             logger.warning("provider 429 hostname=%s attempt=%d body=%.200s", hostname, attempt, preview)
-            if attempt == 0:
-                await asyncio.sleep(60)
+            if attempt < 4:
+                wait = 30 * (attempt + 1)
+                await asyncio.sleep(wait)
                 continue
-            raise RuntimeError(f"AI provider rate limited ({hostname}): {preview}")
+            raise RuntimeError(f"AI provider rate limited after 5 attempts ({hostname}): {preview}")
 
         if response.status_code >= 400:
             preview = response.text[:300]
