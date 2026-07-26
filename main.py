@@ -10,6 +10,10 @@ from q8_redteam_guardrail import (
     create_required_files,
 )
 from q9_mailroom import router as mailroom_router
+from q10_a2a_invoice_agent import (
+    router as q10_router,
+    install_q10_exception_handlers,
+)
 
 
 app = FastAPI(
@@ -33,6 +37,8 @@ app.include_router(run_control_router)
 app.include_router(mcp_router)
 app.include_router(redteam_guardrail_router)
 app.include_router(mailroom_router)
+app.include_router(q10_router)
+install_q10_exception_handlers(app)
 
 
 @app.get("/")
