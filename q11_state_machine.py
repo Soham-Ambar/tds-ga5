@@ -281,17 +281,18 @@ def _make_client_spans_from_dispatch(
 
 
 def _build_waiting_response(state: dict) -> dict:
+    cr = state.get("currentResponse", {})
     return {
         "runId": state["runId"],
         "status": "waiting",
         "diagnosis": state["diagnosis"],
-        "dispatches": state["dispatches"],
-        "approvals": state["approvals"] if state.get("approvals") else [],
-        "actionLog": state.get("actionLog", []),
-        "receiptLog": state.get("receiptLog", []),
-        "otlp": state.get("otlp", {}),
-        "chosenEffect": state.get("chosenEffect"),
-        "suppressed": state.get("suppressed", []),
+        "dispatches": cr.get("dispatches", state.get("dispatches", [])),
+        "approvals": cr.get("approvals", state.get("approvals", [])),
+        "actionLog": cr.get("actionLog", state.get("actionLog", [])),
+        "receiptLog": cr.get("receiptLog", state.get("receiptLog", [])),
+        "otlp": cr.get("otlp", state.get("otlp", {})),
+        "chosenEffect": cr.get("chosenEffect", state.get("chosenEffect")),
+        "suppressed": cr.get("suppressed", state.get("suppressed", [])),
     }
 
 
