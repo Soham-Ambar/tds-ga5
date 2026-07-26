@@ -31,8 +31,8 @@ AI_API_KEY = os.environ.get("AI_API_KEY", "")
 AI_MODEL = os.environ.get("AI_MODEL", "")
 AI_TIMEOUT_SECONDS = int(os.environ.get("AI_TIMEOUT_SECONDS", "60") or "60")
 
-Q10_AI_BATCH_SIZE = int(os.environ.get("Q10_AI_BATCH_SIZE", "4") or "4")
-Q10_AI_MAX_INPUT_TOKENS = int(os.environ.get("Q10_AI_MAX_INPUT_TOKENS", "3000") or "3000")
+Q10_AI_BATCH_SIZE = int(os.environ.get("Q10_AI_BATCH_SIZE", "3") or "3")
+Q10_AI_MAX_INPUT_TOKENS = int(os.environ.get("Q10_AI_MAX_INPUT_TOKENS", "2500") or "2500")
 Q10_AI_CHARS_PER_TOKEN = int(os.environ.get("Q10_AI_CHARS_PER_TOKEN", "4") or "4")
 Q10_AI_MAX_OUTPUT_TOKENS_PER_PACKAGE = int(
     os.environ.get("Q10_AI_MAX_OUTPUT_TOKENS_PER_PACKAGE", "400") or "400"
@@ -1220,7 +1220,7 @@ async def _call_ai_provider(messages: list[dict[str, str]], package_count: int =
         if response.status_code == 429:
             logger.warning("provider 429 hostname=%s attempt=%d", hostname, attempt)
             if attempt < 3:
-                wait = 5 * (attempt + 1)
+                wait = 10 + 15 * attempt
                 await asyncio.sleep(wait)
                 continue
             raise RuntimeError(f"AI provider rate limited after 4 attempts: {hostname}")
