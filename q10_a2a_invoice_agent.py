@@ -249,17 +249,15 @@ def check_a2a_version_header(headers: dict[str, str]) -> None:
 @router.get("/.well-known/agent-card.json")
 async def agent_card():
     base_url = A2A_BASE_URL
+    iface = {"protocolBinding": "HTTP+JSON", "protocolVersion": "1.0"}
+    if base_url:
+        iface["url"] = base_url
     return {
         "name": "TDS GA5 Invoice Action Agent",
         "version": "1.0.0",
         "description": "AI agent that processes invoice claim batches by analyzing each package, selecting an appropriate action, and producing traceable proposals for grader approval.",
         "capabilities": {},
-        "supportedInterfaces": [
-            {
-                "protocolBinding": "HTTP+JSON",
-                "protocolVersion": "1.0",
-            }
-        ],
+        "supportedInterfaces": [iface],
         "defaultInputModes": [BATCH_CONTENT_TYPE],
         "defaultOutputModes": [
             PROPOSAL_CONTENT_TYPE,
@@ -790,7 +788,15 @@ async def _call_ai_for_proposals(
     ]
 
     use_fake = os.environ.get("Q10_FAKE_AI", "").strip() == "1"
-    if use_fake:
+    ai_base_missing = not AI_API_BASE
+    ai_model_missing = not AI_MODEL
+    if use_fake or ai_base_missing or ai_model_missing:
+        if not use_fake:
+            logger.info(
+                "AI not configured (base=%s model=%s), using deterministic mode",
+                "set" if AI_API_BASE else "missing",
+                "set" if AI_MODEL else "missing",
+            )
         raw_proposals = _fake_ai_proposals(jobs, batch_id)
     else:
         text = await _call_ai_provider(messages)
