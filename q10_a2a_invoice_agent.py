@@ -35,10 +35,10 @@ _DOTENV_CANDIDATES = [".env", "/etc/secrets/.env", "/etc/env"]
 
 
 def _find_env(*names: str, default: str = "") -> str:
-    for n in names:
-        v = os.environ.get(n, "")
-        if v:
-            return v
+    lower_names = {n.lower() for n in names}
+    for k, v in os.environ.items():
+        if k.lower() in lower_names and v.strip():
+            return v.strip()
     for dotenv in _DOTENV_CANDIDATES:
         p = Path(dotenv)
         if p.is_file():
@@ -47,11 +47,9 @@ def _find_env(*names: str, default: str = "") -> str:
                     line = line.strip()
                     if not line or line.startswith("#") or "=" not in line:
                         continue
-                    k, _, v = line.partition("=")
-                    k = k.strip()
-                    v = v.strip().strip("\"'")
-                    if k in names and v:
-                        return v
+                    ek, _, ev = line.partition("=")
+                    if ek.strip().lower() in lower_names and ev.strip():
+                        return ev.strip().strip("\"'")
             except OSError:
                 pass
     return default
