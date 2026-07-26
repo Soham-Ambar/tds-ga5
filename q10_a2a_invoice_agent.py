@@ -34,11 +34,12 @@ AI_TIMEOUT_SECONDS = int(os.environ.get("AI_TIMEOUT_SECONDS", "60") or "60")
 
 def _ai_env() -> tuple[str, str, str, int]:
     """Read AI env vars at call time to ensure Render runtime env is picked up."""
-    base = os.environ.get("AI_API_BASE", AI_API_BASE).rstrip("/")
-    key = os.environ.get("AI_API_KEY", AI_API_KEY)
-    model = os.environ.get("AI_MODEL", AI_MODEL)
-    timeout = int(os.environ.get("AI_TIMEOUT_SECONDS", str(AI_TIMEOUT_SECONDS)) or str(AI_TIMEOUT_SECONDS))
-    return base, key, model, timeout
+    base = os.environ.get("ai_api_base", "") or os.environ.get("AI_API_BASE", AI_API_BASE)
+    key = os.environ.get("ai_api_key", "") or os.environ.get("AI_API_KEY", AI_API_KEY)
+    model = os.environ.get("ai_model", "") or os.environ.get("AI_MODEL", AI_MODEL)
+    timeout_str = os.environ.get("ai_timeout_seconds", "") or os.environ.get("AI_TIMEOUT_SECONDS", str(AI_TIMEOUT_SECONDS))
+    timeout = int(timeout_str) if timeout_str and timeout_str.strip() else AI_TIMEOUT_SECONDS
+    return base.rstrip("/"), key, model, timeout
 
 ALLOWED_ACTIONS = frozenset({
     "settle_invoice",
