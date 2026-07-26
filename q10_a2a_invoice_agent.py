@@ -21,15 +21,6 @@ logger = logging.getLogger(__name__)
 
 _ai_diagnostic_done = False
 
-for _q10_k in ("AI_API_BASE", "AI_API_KEY", "AI_MODEL", "AI_TIMEOUT_SECONDS",
-               "A2A_BASE_URL", "A2A_BEARER_TOKEN", "Q10_DB_PATH", "Q10_FAKE_AI"):
-    _q10_v = os.environ.get(_q10_k, "")
-    if _q10_k == "AI_API_KEY":
-        _q10_v = "yes" if _q10_v else "no"
-    elif _q10_k == "A2A_BEARER_TOKEN":
-        _q10_v = "...set..." if _q10_v else ""
-    logger.info("q10_env %s=%s", _q10_k, _q10_v)
-
 Q10_DB_PATH = os.environ.get("Q10_DB_PATH", "q10_a2a.sqlite3")
 _Q10_IS_MEMORY = Q10_DB_PATH == ":memory:"
 A2A_BASE_URL = os.environ.get("A2A_BASE_URL", "").rstrip("/")
@@ -1118,20 +1109,6 @@ async def cancel_task(task_id: str, request: Request):
             conn.execute("COMMIT")
 
     return task_obj
-
-
-@router.get("/debug/q10-env")
-async def debug_q10_env():
-    """Diagnostic endpoint — returns env var status (no secrets)."""
-    result = {}
-    for k in ("AI_API_BASE", "AI_MODEL", "AI_TIMEOUT_SECONDS",
-              "A2A_BASE_URL", "Q10_DB_PATH", "Q10_FAKE_AI"):
-        v = os.environ.get(k, "")
-        result[k] = v if v else "(not set)"
-    result["AI_API_KEY"] = "yes" if os.environ.get("AI_API_KEY", "") else "no"
-    result["A2A_BEARER_TOKEN"] = "...set..." if os.environ.get("A2A_BEARER_TOKEN", "") else ""
-    result["_ai_env()"] = list(_ai_env()[:3]) + ["..."]
-    return result
 
 
 def install_q10_exception_handlers(app):
