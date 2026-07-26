@@ -21,13 +21,6 @@ logger = logging.getLogger(__name__)
 
 _ai_diagnostic_done = False
 
-logger.info(
-    "q10 startup AI_API_BASE=%s AI_MODEL=%s key_present=%s",
-    os.environ.get("AI_API_BASE", "") or "(empty)",
-    os.environ.get("AI_MODEL", "") or "(empty)",
-    "yes" if os.environ.get("AI_API_KEY", "") else "no",
-)
-
 Q10_DB_PATH = os.environ.get("Q10_DB_PATH", "q10_a2a.sqlite3")
 _Q10_IS_MEMORY = Q10_DB_PATH == ":memory:"
 A2A_BASE_URL = os.environ.get("A2A_BASE_URL", "").rstrip("/")
@@ -37,6 +30,15 @@ AI_API_BASE = os.environ.get("AI_API_BASE", "").rstrip("/")
 AI_API_KEY = os.environ.get("AI_API_KEY", "")
 AI_MODEL = os.environ.get("AI_MODEL", "")
 AI_TIMEOUT_SECONDS = int(os.environ.get("AI_TIMEOUT_SECONDS", "60") or "60")
+
+
+def _ai_env() -> tuple[str, str, str, int]:
+    """Read AI env vars at call time to ensure Render runtime env is picked up."""
+    base = os.environ.get("AI_API_BASE", AI_API_BASE).rstrip("/")
+    key = os.environ.get("AI_API_KEY", AI_API_KEY)
+    model = os.environ.get("AI_MODEL", AI_MODEL)
+    timeout = int(os.environ.get("AI_TIMEOUT_SECONDS", str(AI_TIMEOUT_SECONDS)) or str(AI_TIMEOUT_SECONDS))
+    return base, key, model, timeout
 
 ALLOWED_ACTIONS = frozenset({
     "settle_invoice",
@@ -400,8 +402,9 @@ async def message_send(request: Request):
                         detail={"error": {"code": "UNSUPPORTED_MEDIA_TYPE", "message": f"Unsupported mediaType: {media_type}."}},
                     )
             except RuntimeError as exc:
-                hostname = urlparse(AI_API_BASE).hostname or "unknown"
-                model = AI_MODEL or "unknown"
+                ai_base, _, ai_model, _ = _ai_env()
+                hostname = urlparse(ai_base).hostname or "unknown"
+                model = ai_model or "unknown"
                 error_msg = str(exc)
                 logger.error(
                     "ai_error hostname=%s model=%s error=%.500s",
@@ -740,8 +743,9 @@ async def _generate_proposals(
             uncached.append({"package": package, "packageId": package_id, "fingerprint": fp})
 
     if uncached:
-        hostname = urlparse(AI_API_BASE).hostname or "unknown"
-        model = AI_MODEL or "unknown"
+        ai_base, _, ai_model, _ = _ai_env()
+        hostname = urlparse(ai_base).hostname or "unknown"
+        model = ai_model or "unknown"
 
         ai_proposals = await _call_ai_for_proposals(uncached, batch_id)
 
@@ -813,9 +817,10 @@ async def _call_ai_for_proposals(
     if use_fake:
         raw_proposals = _fake_ai_proposals(jobs, batch_id)
     else:
-        if not AI_API_BASE:
+        ai_base, ai_key, ai_model, ai_timeout = _ai_env()
+        if not ai_base:
             raise RuntimeError("AI_API_BASE is not configured.")
-        if not AI_MODEL:
+        if not ai_model:
             raise RuntimeError("AI_MODEL is not configured.")
         text = await _call_ai_provider(messages)
         raw_proposals = _parse_ai_response(text, len(jobs))
@@ -937,12 +942,9 @@ def _parse_ai_response(text: str, expected_count: int) -> list[dict[str, Any]]:
 
 async def _call_ai_provider(messages: list[dict[str, str]]) -> str:
     global _ai_diagnostic_done
-    api_base = AI_API_BASE
+    api_base, api_key, model, ai_timeout = _ai_env()
     if not api_base:
         raise RuntimeError("AI_API_BASE is not configured.")
-    api_key = AI_API_KEY
-    model = AI_MODEL
-
     if not model:
         raise RuntimeError("AI_MODEL is not configured.")
 
@@ -968,7 +970,7 @@ async def _call_ai_provider(messages: list[dict[str, str]]) -> str:
         "max_tokens": 4000,
     }
 
-    timeout = httpx.Timeout(connect=10, read=AI_TIMEOUT_SECONDS, write=20, pool=10)
+    timeout = httpx.Timeout(connect=10, read=ai_timeout, write=20, pool=10)
 
     try:
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
