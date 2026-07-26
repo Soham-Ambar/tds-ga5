@@ -1120,6 +1120,20 @@ async def cancel_task(task_id: str, request: Request):
     return task_obj
 
 
+@router.get("/debug/q10-env")
+async def debug_q10_env():
+    """Diagnostic endpoint — returns env var status (no secrets)."""
+    result = {}
+    for k in ("AI_API_BASE", "AI_MODEL", "AI_TIMEOUT_SECONDS",
+              "A2A_BASE_URL", "Q10_DB_PATH", "Q10_FAKE_AI"):
+        v = os.environ.get(k, "")
+        result[k] = v if v else "(not set)"
+    result["AI_API_KEY"] = "yes" if os.environ.get("AI_API_KEY", "") else "no"
+    result["A2A_BEARER_TOKEN"] = "...set..." if os.environ.get("A2A_BEARER_TOKEN", "") else ""
+    result["_ai_env()"] = list(_ai_env()[:3]) + ["..."]
+    return result
+
+
 def install_q10_exception_handlers(app):
     @app.middleware("http")
     async def q10_error_middleware(request: Request, call_next):
